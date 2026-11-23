@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air Ping Pong</title>
+<style>
+  :root { --ink:#f2ecff; --dim:#a79cc4; --bg:#06040c; --glow:#ffb35c; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:15px/1.5 "Avenir Next","Segoe UI",system-ui,sans-serif; overflow:hidden; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; touch-action:none; }
+  video { display:none; }
+  #overlay { position:fixed; inset:0; z-index:2; display:flex; align-items:center; justify-content:center; background:rgba(6,4,12,.96); overflow:auto; }
+  #card { max-width:46rem; padding:2rem; }
+  ul { margin:.4rem 0; padding-left:1.1rem; color:var(--dim); font-size:.92rem; line-height:1.45; } li { margin:.3rem 0; } li i { font-style:normal; font-weight:600; color:var(--ink); }
+  h1 { font-weight:300; font-size:2.4rem; margin:0 0 .6rem; }
+  p { margin:.4rem 0; color:var(--dim); } p b { color:var(--ink); }
+  .red { color:#ff5a6e; font-weight:600; } .blk { color:#cfc6e6; font-weight:600; }
+  button { margin:1.2rem .8rem 0 0; font:inherit; padding:.7rem 1.6rem; color:#1c0d02; background:var(--glow); border:0; border-radius:999px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--dim); }
+  button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { min-height:1.4rem; margin-top:.8rem; color:#ff9a7a; }
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted></video>
+<canvas id="view"></canvas>
+<div id="overlay"><div id="card">
+  <h1>Air Ping Pong</h1>
+  <p><b>Your open hand is the racket.</b> Your palm is the <span class="red">red forehand rubber</span>, the back of your hand is the <span class="blk">black backhand rubber</span>. The ball comes off whichever side it touches, at the angle you hold it, with the speed and spin of your swing. It is real collision physics, with no preset shots.</p>
+  <ul>
+    <li><i>Face angle.</i> Tilt your fingertips back toward you (palm turning up) to <b>open</b> the face and lift the ball. Tilt them toward the screen to <b>close</b> it and keep the ball low. Turn the palm left or right to aim.</li>
+    <li><i>Swing.</i> Push toward the screen for power. Brush up through the ball for topspin (it dips onto the table), brush down for backspin (it floats), brush sideways for sidespin (it curves). Hold still to block.</li>
+    <li><i>Incoming spin.</i> Topspin jumps off your racket high and long, so close the face. Backspin drops into the net, so open the face and lift. The label above the ball says which one is coming.</li>
+  </ul>
+  <p>The little ring on the table shows where the ball would land if it met your racket as you hold it right now: <b style="color:#7dffb0">green</b> lands, <b style="color:#ffd84d">yellow</b> lands only with the assist, <b style="color:#ff4d6d">red</b> misses. First to 11, two ahead. To serve, swing through the ball floating in front of you.</p>
+  <p>When the camera starts, <b>show it your open palm</b> (like a high five) so it learns which side is which.</p>
+  <p>Keys: <b>1 2 3</b> CPU level · <b>A</b> assist (casual, normal, pro = pure physics) · <b>R</b> guides · <b>H</b> other hand · <b>B</b> swap palm and back · <b>V</b> camera · <b>M</b> mute · <b>P</b> pause · <b>F</b> full screen. With the mouse, the wheel or <b>↑ ↓</b> tilt the face.</p>
+  <button id="start">Start camera and sound</button><button id="mouse" class="ghost">Play with the mouse instead</button>
+  <div id="status" role="status"></div>
+</div></div>
+
+<script type="module">
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";   // the hand tracker, loaded only when the camera starts (so the mouse game works offline)
+
+/* ═══════════ CONFIG ═══════════ */
+const C = {
+  G: 5,           // gravity in m/s²: lower than real, so the ball is slow enough to play with a camera
+  GAIN: 1.25,     // hand movement is amplified around the screen centre, so the edges are reachable without leaving the camera picture (1 = 1:1)
+  SMOOTH: 30,     // racket position smoothing: higher = snappier, lower = steadier
+  FACE_SMOOTH: 18,// racket angle smoothing: higher = snappier, lower = steadier
+  FACE_GAIN: 1,   // 1 = the racket tilts exactly as much as your hand; below 1 = calmer, above 1 = livelier
+  FACE_PITCH: 0,  // degrees added to the open / closed angle, if your webcam sees your hand from far above or below
+  DEPTH: 1,       // how strongly moving your hand toward / away from the camera moves the racket forward / back
+  CAM_FOV: 62,    // horizontal field of view of the webcam in degrees: turns your hand growing in the picture into forward speed
+  SERVE_V: .7,    // how fast (m/s) the racket must be going to launch the serve
+  SERVE_PUSH: 2.2,// a serve always gets at least this much push through the ball (the floating ball replaces the toss)
+  WIN: 11,        // points to win (and two ahead)
+  E_TABLE: .9,    // the table bounce keeps this part of the ball's vertical speed
+  MU_TABLE: .2,   // how grippy the table is: this is what makes spin kick the ball forward, back or sideways when it lands
+  DRAG: .09,      // air drag (close to a real ball's: hard shots slow down and drop)
+  MAGNUS: .006,   // how strongly spin bends the flight (topspin dips, backspin floats, sidespin curves)
+  E_PAD: .82,     // your rubber: how bouncy it is
+  MU_PAD: .8,     // how grippy it is: grip turns a brush into spin, and turns incoming spin into a kick
+  ET_PAD: .5,     // how much the rubber springs back along its face (0 = the ball just rolls off; more = more spin from a brush)
+  POWER: .7,      // your hand speed is amplified for reach; this scales the push through the ball (along the face) back to the game's ball speeds
+  BRUSH: 1.3,     // and this scales the brush across the face, which is what makes spin
+  KICK_T: .0075,  // how strongly incoming topspin / backspin disturbs the CPU's returns
+  KICK_S: .006,   // the same for sidespin
+};
+const AIDS = [                                                     // the assist: tol = a shot that misses the table by less than this (m) is steered onto it, keeping its spin and pace; hit = hit-zone size; fwd = forward travel assumed in a swing the camera can't see
+  { n: "casual", tol: .75, hit: 1.35, fwd: .5 },
+  { n: "normal", tol: .3,  hit: 1.15, fwd: .35 },
+  { n: "pro",    tol: 0,   hit: 1,    fwd: 0 },
+];
+/* the world, in metres: x to the right, y up, z away from you. The table is 2.74 x 1.525 m, 0.76 m high, and the net is in the middle (z = 0) */
+const TL = 2.74, TW = 1.525, TT = .76, NH = .1525, R = .035;       // table length and width, table height, net height, ball radius (a bit bigger than real, so you can see it)
+const PL = 1.65, PR = .14;                                         // the rackets rest at z = -PL (you) and z = +PL (CPU); PR is the racket radius
+const S_BLOCK = .7, S_ACTIVE = 1;                                  // swing speeds in m/s: below S_BLOCK you are just holding the racket; meeting the ball before it reaches you needs S_ACTIVE
+const REACH = .9, LATE = .3;                                       // you can hit the ball from REACH metres in front of your racket until it is LATE metres behind it
+const LV = [                                                       // the CPU levels: racket speed (m/s), aiming error, how cleverly it places the ball, reaction time, speed of its shots (1 = base), chance of a plain bad shot, how well it reads spin, how often it loops / curves / smashes
+  { n: "easy",   v: 2.2, ex: .2,  ez: .22, smart: .2,  react: .3,  ts: 1.3,  err: .14, read: .45, loop: .06, curve: .04, smash: .12 },
+  { n: "normal", v: 3.3, ex: .1,  ez: .14, smart: .5,  react: .18, ts: 1.05, err: .07, read: .7,  loop: .18, curve: .1,  smash: .3 },
+  { n: "hard",   v: 4.6, ex: .05, ez: .07, smart: .85, react: .08, ts: .9,   err: .03, read: .9,  loop: .3,  curve: .18, smash: .55 },
+];
+/* The CPU's strokes (your shots come out of the physics instead; these names also label them afterwards).
+   top = topspin (+) or backspin (-) in rad/s, side = sidespin, tz = where the ball first lands (m from the net), T = flight time (s); each is [soft, hard]. pitch = how the CPU tilts its racket for it (degrees, + = open) */
+const ST = {
+  block: { n: "BLOCK", col: "#9ad8ff", top: [0, 0],       tz: [.5, .5],    T: [1, 1],       pitch: 0 },
+  push:  { n: "PUSH",  col: "#c9b6ff", top: [-70, -100],  tz: [.35, .65],  T: [1.15, 1],    pitch: 40 },
+  chop:  { n: "CHOP",  col: "#a98bff", top: [-95, -135],  tz: [.85, 1.15], T: [.95, .8],    pitch: 35 },
+  lift:  { n: "LIFT",  col: "#7dffb0", top: [40, 70],     tz: [.95, 1.2],  T: [1.3, 1.1],   pitch: 20 },
+  loop:  { n: "LOOP",  col: "#ff9a4d", top: [110, 170],   tz: [.8, 1.15],  T: [.7, .5],     pitch: -30 },
+  drive: { n: "DRIVE", col: "#ffd84d", top: [15, 35],     tz: [.6, 1.1],   T: [.95, .55],   pitch: -12 },
+  curve: { n: "CURVE", col: "#6ee7ff", top: [20, 40],     tz: [.6, .95],   T: [.85, .6],    pitch: -10, side: [70, 120] },
+  smash: { n: "SMASH", col: "#ff4d6d", top: [30, 60],     tz: [.6, 1],     T: [.45, .34],   pitch: -35 },
+};
+const FONT = '"Avenir Next","Segoe UI",system-ui,sans-serif', TAU = Math.PI * 2, DEG = Math.PI / 180;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v)), rnd = (a, b) => a + Math.random() * (b - a), lerp = (a, b, t) => a + (b - a) * t;
+const dot = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z, mul = (a, s) => ({ x: a.x * s, y: a.y * s, z: a.z * s });
+const add = (a, b, s = 1) => ({ x: a.x + b.x * s, y: a.y + b.y * s, z: a.z + b.z * s }), sub = (a, b) => add(a, b, -1);
+const cross = (a, b) => ({ x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x });
+const len = a => Math.hypot(a.x, a.y, a.z), nrm = a => mul(a, 1 / (len(a) || 1));
+
+/* ═══════════ Audio ═══════════ */
+const SND = {
+  muted: false,
+  async start() {
+    const c = this.c = new AudioContext({ latencyHint: "interactive" }); await c.resume();
+    const comp = c.createDynamicsCompressor(), m = this.m = c.createGain(); m.gain.value = .55; m.connect(comp); comp.connect(c.destination);
+    const n = this.noise = c.createBuffer(1, c.sampleRate, c.sampleRate), d = n.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  },
+  env(g, t, vol, dur) { g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .004); g.gain.exponentialRampToValueAtTime(.0001, t + dur); },
+  tone(f0, f1, dur, vol = .2, type = "sine", at = 0) {
+    if (!this.c || this.muted) return;
+    const c = this.c, t = c.currentTime + at, o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    this.env(g, t, vol, dur); o.connect(g); g.connect(this.m); o.start(t); o.stop(t + dur + .05);
+  },
+  hiss(f, dur, vol, q = 2) {
+    if (!this.c || this.muted) return;
+    const c = this.c, t = c.currentTime, s = c.createBufferSource(), fl = c.createBiquadFilter(), g = c.createGain();
+    s.buffer = this.noise; fl.type = "bandpass"; fl.Q.value = q; fl.frequency.value = f; this.env(g, t, vol, dur); s.connect(fl); fl.connect(g); g.connect(this.m); s.start(t); s.stop(t + dur + .05);
+  },
+  hit(you, hard = .5) { const f = you ? 1 : .75, v = .18 + .2 * hard; this.tone(1250 * f, 650 * f, .06, v, "triangle"); this.hiss(3200 * f, .05, v * .8); },   // the "tok" of the racket, louder for harder hits
+  bounce() { this.tone(820, 480, .05, .14, "sine"); this.hiss(2200, .03, .06); },
+  net() { this.tone(210, 120, .12, .25, "triangle"); this.hiss(900, .1, .15, 1); },
+  win() { [0, 4, 7, 12].forEach((s, i) => this.tone(523 * 2 ** (s / 12), 523 * 2 ** (s / 12), .18, .13, "sine", i * .06)); },
+  lose() { [0, -3, -7].forEach((s, i) => this.tone(330 * 2 ** (s / 12), 330 * 2 ** (s / 12) * .98, .22, .14, "triangle", i * .1)); },
+  fanfare(won) { (won ? [0, 4, 7, 12, 16] : [0, -2, -5, -9]).forEach((s, i) => this.tone(392 * 2 ** (s / 12), 392 * 2 ** (s / 12), .3, .15, "triangle", i * .14)); },
+};
+
+/* ═══════════ State & layout ═══════════ */
+const video = document.getElementById("cam"), canvas = document.getElementById("view"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, F = 1, landmarker = null, showVideo = true, lastVideoTime = -1, lastHand = 0;
+const G = { state: "menu", score: [0, 0], startServer: "P", server: "P", t: 0, pointT: 0, aiServeAt: 0, msg: "", msgT: -9, rally: 0, level: 0, aid: 1, guide: true, paused: false, path: null, feed: [], acc: 0, last: null, won: false, pv: null };
+const B = { x: 0, y: 1.3, z: -PL, vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, m: [1, 0, 0, 0, 1, 0, 0, 0, 1], live: false, hitBy: null, bnc: 0, trail: [], dPrev: 1e9 };           // the ball: w = spin (rad/s), m = its orientation (for the seam), bnc = table bounces since the last hit
+const P = {                                                        // your racket
+  tx: 0, ty: 0, sx: 0, sy: 0, x: 0, y: 1.2, z: -PL, vx: 0, vy: 0, vz: 0, hist: [], rpx: 100, flash: 0, lunge: 0,
+  N: { x: 0, y: 0, z: 1 }, up: { x: 0, y: 1, z: 0 },              // N: the way your palm faces (in the game world); up: toward your fingertips
+  tN: { x: 0, y: 0, z: 1 }, tUp: { x: 0, y: 1, z: 0 },            // the same, as last measured by the camera (before smoothing)
+  src: "mouse", mPitch: 10,                                        // who drives the racket; the mouse player's face angle (degrees, + = open)
+  seen: 0, raw: { x: 0, y: 0 }, lefty: false, flip: 1, calibrated: false, votes: [],   // hand tracking: which hand, and which side of it is the palm
+  ls: null, ls0: null, lsT: 0, zoff: 0,                            // how big the hand looks (log scale), its resting value, and the racket's forward offset that follows from it
+};
+const AI = { x: 0, y: 1.15, z: PL, hz: PL, plan: null, flash: 0, pitch: 0, pitchT: 0 };
+let sparks = [], rings = [];
+function resize() {
+  const d = Math.min(devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight; F = Math.min(H * 1.15, W * .75);
+  canvas.width = W * d; canvas.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+}
+addEventListener("resize", resize); resize(); P.tx = P.sx = W / 2; P.ty = P.sy = H * .6;
+
+/* the camera: behind your end of the table, a little above it, looking down the table */
+const CAM = { x: 0, y: 1.9, z: -2.9, p: .369 }, CY = .56;
+function proj(x, y, z) {
+  const dx = x - CAM.x, dy = y - CAM.y, dz = z - CAM.z, c = Math.cos(CAM.p), s = Math.sin(CAM.p);
+  const yc = dy * c + dz * s, zc = -dy * s + dz * c, k = F / Math.max(zc, .05);
+  return { x: W / 2 + dx * k, y: H * CY - yc * k, k, zc };               // k = pixels per metre at that depth
+}
+function unproj(sx, sy, z) {                                              // which point of the vertical plane at depth z lies under a screen position
+  const xn = (sx - W / 2) / F, yn = (H * CY - sy) / F, c = Math.cos(CAM.p), s = Math.sin(CAM.p);
+  const dx = xn, dy = yn * c - s, dz = yn * s + c, t = (z - CAM.z) / dz;
+  return { x: CAM.x + dx * t, y: CAM.y + dy * t };
+}
+
+/* ═══════════ Hand tracking ═══════════
+   The palm is the racket's red face and the back of the hand its black face. MediaPipe gives every hand point in 3D (metres), so:
+   - where:    the palm centre, mirrored like a mirror, is where the racket is on the screen
+   - angle:    the palm's normal (index knuckle → pinky knuckle, crossed with wrist → middle knuckle) is the way the face points
+   - forward:  how big the hand looks in the picture tells how close it is to the camera, so pushing toward the screen pushes the racket forward */
+async function makeLandmarker() {
+  const { HandLandmarker, FilesetResolver } = await import(`${MP}/vision_bundle.mjs`);
+  const fs = await FilesetResolver.forVisionTasks(`${MP}/wasm`);
+  const make = delegate => HandLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate },
+    runningMode: "VIDEO", numHands: 2, minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5 });
+  try { return await make("GPU"); } catch { return await make("CPU"); }
+}
+function camGeom() {                                   // the camera picture as drawn: filled over the screen, zoomed by GAIN around the centre
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9, sc = Math.max(W / vw, H / vh) * C.GAIN;
+  return { dw: vw * sc, dh: vh * sc, sc, vw, vh };
+}
+function toScreen(p) { const { dw, dh } = camGeom(); return { x: clamp(W / 2 + dw / 2 - p.x * dw, 0, W), y: clamp(H / 2 - dh / 2 + p.y * dh, 0, H) }; }
+function onDetect(res, now) {
+  const L = res.landmarks || [], WL = res.worldLandmarks || [];
+  if (!L.length) return;
+  const hs = L.map((lm, i) => { let x = 0, y = 0; for (const j of [0, 5, 9, 9, 13, 17]) { x += lm[j].x / 6; y += lm[j].y / 6; } return { lm, wl: WL[i], p: toScreen({ x, y }) }; });
+  let h;
+  if (now - P.seen < 300) h = hs.reduce((a, b) => Math.hypot(b.p.x - P.raw.x, b.p.y - P.raw.y) < Math.hypot(a.p.x - P.raw.x, a.p.y - P.raw.y) ? b : a);   // stay with the hand that was just tracked
+  else { hs.sort((a, b) => a.p.x - b.p.x); h = P.lefty ? hs[0] : hs[hs.length - 1]; P.ls0 = null; }                                                 // otherwise the right-most hand (H switches)
+  lastHand = now; P.src = "hand"; P.raw = h.p; P.seen = now; P.tx = h.p.x; P.ty = h.p.y;
+  handPose(h.lm, h.wl && h.wl.length === 21 ? h.wl : null);
+}
+function handPose(lm, wl) {
+  const { vw, vh } = camGeom();
+  const pt = i => wl ? wl[i] : { x: lm[i].x * vw, y: lm[i].y * vh, z: lm[i].z * vw };            // camera space: x right, y down, z away from the camera
+  const across = sub(pt(5), pt(17)), along = sub(pt(9), pt(0));
+  const nc = cross(across, along); if (len(nc) < 1e-9) return;
+  // the camera faces you and the game looks where you look, so every axis flips. For a right hand this is the palm side; for a left hand flip = -1 fixes it
+  let n = mul(nrm(nc), -P.flip);
+  if (!P.calibrated && Math.abs(n.z) > .6) {                       // the first clear views of the hand are taken to be the palm (the start screen asks for that)
+    P.votes.push(Math.sign(n.z));
+    if (P.votes.length >= 12) { if (P.votes.reduce((a, b) => a + b, 0) < 0) { P.flip = -P.flip; n = mul(n, -1); } P.calibrated = true; P.votes = []; }
+  }
+  if (C.FACE_GAIN !== 1 || C.FACE_PITCH) {                         // optional: scale / offset the open-closed angle of the face pointing at the table
+    const sg = n.z >= 0 ? 1 : -1, f = mul(n, sg), pitch = Math.asin(clamp(f.y, -1, 1)) * C.FACE_GAIN + C.FACE_PITCH * DEG, yaw = Math.atan2(f.x, f.z) * C.FACE_GAIN;
+    n = mul({ x: Math.cos(pitch) * Math.sin(yaw), y: Math.sin(pitch), z: Math.cos(pitch) * Math.cos(yaw) }, sg);
+  }
+  P.tN = n; P.tUp = nrm(mul(along, -1));
+  if (wl) {                                                        // how many picture pixels one metre of hand covers (a fit over the palm, so turning the hand doesn't change it)
+    const ids = [0, 1, 2, 5, 9, 13, 17]; let ix = 0, iy = 0, wx = 0, wy = 0;
+    for (const i of ids) { ix += lm[i].x * vw / 7; iy += lm[i].y * vh / 7; wx += wl[i].x / 7; wy += wl[i].y / 7; }
+    let a = 0, b = 0; for (const i of ids) { a += (lm[i].x * vw - ix) ** 2 + (lm[i].y * vh - iy) ** 2; b += (wl[i].x - wx) ** 2 + (wl[i].y - wy) ** 2; }
+    if (b > 1e-8) { const ls = .5 * Math.log(a / b); if (P.ls === null || Math.abs(ls - P.ls) > .3) P.ls0 = null; P.ls = ls; }   // a sudden jump is a tracking glitch, not a swing: start over from there
+  }
+}
+function mouseFace() {                                 // the mouse player's face: tilted by the wheel, turned a little toward the middle of the table
+  const p = P.mPitch * DEG, aim = nrm({ x: -P.x * .45, y: 0, z: 1.6 });
+  return { N: nrm({ x: aim.x * Math.cos(p), y: Math.sin(p), z: aim.z * Math.cos(p) }), up: { x: 0, y: 1, z: 0 } };
+}
+function moveRacket(dt) {                              // smoothed on screen, placed in 3D at its depth, then its velocity
+  const k = 1 - Math.exp(-dt * C.SMOOTH); P.sx += (P.tx - P.sx) * k; P.sy += (P.ty - P.sy) * k;
+  const f = P.src === "hand" ? { N: P.tN, up: P.tUp } : mouseFace(), kf = 1 - Math.exp(-dt * C.FACE_SMOOTH);
+  const nN = add(mul(P.N, 1 - kf), f.N, kf); P.N = len(nN) > .05 ? nrm(nN) : f.N;
+  const nU = add(mul(P.up, 1 - kf), f.up, kf); P.up = len(nU) > .05 ? nrm(nU) : f.up;
+  let zt = 0;                                          // forward / back: the hand growing in the picture means it came closer to the camera, i.e. toward the table
+  if (P.src === "hand" && P.ls !== null && video.videoWidth) {
+    if (P.ls0 === null) P.ls0 = P.ls;
+    P.ls0 += (P.ls - P.ls0) * (1 - Math.exp(-dt / 1.5));                         // the resting distance drifts slowly, so only real pushes count
+    const { sc, vw } = camGeom(), fpx = vw / (2 * Math.tan(C.CAM_FOV * DEG / 2)), kpx = proj(P.x, P.y, P.z).k;
+    zt = clamp(C.DEPTH * fpx * sc / kpx * (P.ls - P.ls0), -.25, .4);              // same scale as sideways moves: picture px per metre × screen px per picture px ÷ screen px per game metre
+  }
+  P.zoff += (zt - P.zoff) * k; P.z = -PL + P.zoff; P.lunge = Math.max(0, P.lunge - dt * 2.5);
+  const w = unproj(P.sx, P.sy, P.z); P.x = clamp(w.x, -1.8, 1.8); P.y = clamp(w.y, .45, 2.2);
+  P.hist.push({ t: G.t, x: P.x, y: P.y, z: P.z, sx: P.sx, sy: P.sy }); while (P.hist.length > 1 && P.hist[0].t < G.t - .25) P.hist.shift();
+  const ref = P.hist.find(s => s.t >= G.t - .08) || P.hist[0], span = Math.max(.03, G.t - ref.t);        // velocity over the last 80 ms
+  P.vx = (P.x - ref.x) / span; P.vy = (P.y - ref.y) / span; P.vz = (P.z - ref.z) / span;
+  P.rpx = proj(P.x, P.y, P.z).k * PR * AIDS[G.aid].hit;               // the hit zone on the screen
+}
+
+/* ═══════════ Physics: flight, spin and bounces ═══════════ */
+const HS = 1 / 240;                                    // the physics step (fixed, so the shot solver and the game agree exactly)
+function fly(o, h) {                                   // one step of flight: gravity, air drag, and the Magnus force (a spinning ball curves: acceleration = MAGNUS · spin × velocity)
+  const sp = Math.hypot(o.vx, o.vy, o.vz), d = C.DRAG * sp, m = C.MAGNUS;
+  o.vx += (-d * o.vx + m * (o.wy * o.vz - o.wz * o.vy)) * h;
+  o.vy += (-C.G - d * o.vy + m * (o.wz * o.vx - o.wx * o.vz)) * h;
+  o.vz += (-d * o.vz + m * (o.wx * o.vy - o.wy * o.vx)) * h;
+  o.x += o.vx * h; o.y += o.vy * h; o.z += o.vz * h;
+  const k = 1 - .12 * h; o.wx *= k; o.wy *= k; o.wz *= k;      // the spin fades slowly
+}
+/* The ball (a thin shell) hits a surface with normal n that moves at u. It rebounds with restitution e, and friction mu grips the surface:
+   the point of the ball touching the surface is pushed until it stops sliding (et > 0: until it springs back the other way) or the friction runs out.
+   That friction is what turns a brush into spin, and what makes incoming spin kick the ball. Returns false if the ball isn't moving into the surface. */
+function contact(o, nx, ny, nz, e, mu, ux = 0, uy = 0, uz = 0, et = 0) {
+  let rx = o.vx - ux, ry = o.vy - uy, rz = o.vz - uz;
+  const vn = rx * nx + ry * ny + rz * nz; if (vn >= 0) return false;
+  const cx = rx - R * (o.wy * nz - o.wz * ny), cy = ry - R * (o.wz * nx - o.wx * nz), cz = rz - R * (o.wx * ny - o.wy * nx);     // velocity of the touching point
+  const cn = cx * nx + cy * ny + cz * nz, tx = cx - cn * nx, ty = cy - cn * ny, tz = cz - cn * nz, us = Math.hypot(tx, ty, tz);     // how fast it slides
+  const jn = -(1 + e) * vn;
+  rx += jn * nx; ry += jn * ny; rz += jn * nz;
+  if (us > 1e-6) {
+    const j = Math.min((1 + et) * us / 2.5, mu * jn), ax = tx / us, ay = ty / us, az = tz / us, k = 1.5 * j / R;       // gripping (j = (1+et)·us/2.5) or still sliding (j = mu · jn)
+    rx -= j * ax; ry -= j * ay; rz -= j * az;
+    o.wx += k * (ny * az - nz * ay); o.wy += k * (nz * ax - nx * az); o.wz += k * (nx * ay - ny * ax);
+  }
+  o.vx = ux + rx; o.vy = uy + ry; o.vz = uz + rz;
+  return true;
+}
+function tableBounce(o) {
+  if (o.vy < 0 && o.y - R <= TT && o.y - R > TT - .25 && Math.abs(o.x) <= TW / 2 + .01 && Math.abs(o.z) <= TL / 2 + .01) { o.y = TT + R; contact(o, 0, 1, 0, C.E_TABLE, C.MU_TABLE); return true; }
+  return false;
+}
+const copyBall = b => ({ x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz, wx: b.wx, wy: b.wy, wz: b.wz });
+function pathFrom(b) {                                 // the exact future of the ball until it gets behind your racket: for the dotted guide
+  const o = copyBall(b), pts = [];
+  for (let i = 0; i < 900; i++) {
+    fly(o, HS); tableBounce(o); if (i % 5 === 4) pts.push({ x: o.x, y: o.y, z: o.z, t: (i + 1) * HS });
+    if (o.z < -PL - .35 || o.y < .3) break;
+  }
+  return { pts, t0: G.t };
+}
+/* A shot is aimed: given where the ball is (with its spin), where it should first land (tx, tz) and how long it should fly (T), this finds the launch velocity
+   by simulating the real physics, spin included. It makes the flight longer (a higher arc) until the ball clears the net. Used by the CPU, and by the assist. */
+function simShot(p, v) {
+  const o = { x: p.x, y: p.y, z: p.z, vx: v.x, vy: v.y, vz: v.z, wx: p.wx, wy: p.wy, wz: p.wz };
+  let yNet = null;
+  for (let i = 1; i < 900; i++) {
+    const px = o.x, py = o.y, pz = o.z; fly(o, HS);
+    if (yNet === null && pz !== o.z && pz * o.z <= 0) yNet = py + (o.y - py) * pz / (pz - o.z);
+    if (o.vy < 0 && o.y <= TT + R) { const f = (py - TT - R) / (py - o.y); return { x: px + (o.x - px) * f, z: pz + (o.z - pz) * f, t: (i - 1 + f) * HS, yNet }; }
+  }
+  return null;
+}
+function solveShot(p, tx, tz, T) {
+  let v, ok = false;
+  for (let attempt = 0; attempt < 9 && !ok; attempt++, T *= 1.1) {
+    v = { x: (tx - p.x) / T, y: (TT + R - p.y + .5 * C.G * T * T) / T, z: (tz - p.z) / T };
+    let r = null;
+    for (let it = 0; it < 12; it++) {
+      r = simShot(p, v); if (!r) break;
+      const ex = tx - r.x, ez = tz - r.z, et = T - r.t;
+      if (Math.abs(ex) < .008 && Math.abs(ez) < .008 && Math.abs(et) < .015) break;
+      const r2 = simShot(p, { x: v.x, y: v.y + .15, z: v.z }), dt = r2 ? clamp((r2.t - r.t) / .15, .05, 1.5) : .3;      // how much the flight time changes with the launch height
+      v.x += ex / r.t; v.z += ez / r.t; v.y += .85 * et / dt;
+    }
+    r = simShot(p, v);
+    ok = !!r && Math.hypot(r.x - tx, r.z - tz) < .05 && r.yNet !== null && r.yNet - R >= TT + NH + .035;                  // it lands where it should and clears the net
+  }
+  return { v, ok };
+}
+function spinBall(dt) {                                // turn the ball's orientation (for the seam you see rotating)
+  const w = Math.hypot(B.wx, B.wy, B.wz); if (w < 1e-3) return;
+  const th = w * dt, ax = B.wx / w, ay = B.wy / w, az = B.wz / w, c = Math.cos(th), s = Math.sin(th), t = 1 - c, m = B.m, o = new Array(9);
+  const Rm = [t * ax * ax + c, t * ax * ay - s * az, t * ax * az + s * ay, t * ax * ay + s * az, t * ay * ay + c, t * ay * az - s * ax, t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c];
+  for (let r = 0; r < 3; r++) for (let q = 0; q < 3; q++) o[r * 3 + q] = Rm[r * 3] * m[q] + Rm[r * 3 + 1] * m[3 + q] + Rm[r * 3 + 2] * m[6 + q];
+  B.m = o;
+}
+function stepBall(h) {
+  const b = B, px = b.x, py = b.y, pz = b.z;
+  fly(b, h);
+  if (b.y < R && b.vy < 0) { b.y = R; b.vy *= -.5; b.vx *= .85; b.vz *= .85; b.wx *= .5; b.wy *= .5; b.wz *= .5; }                      // the floor
+  if (tableBounce(b)) bounce(b.z < 0 ? "P" : "A");
+  if (pz * b.z < 0 && b.y - R < TT + NH && b.y > TT - .05 && Math.abs(b.x) < TW / 2 + .15) {         // into the net
+    b.z = pz; b.vz *= -.2; b.vx *= .5; if (G.state === "rally") { SND.net(); fault(b.hitBy, "net"); }
+  }
+  if (G.state !== "rally") return;
+  if (b.hitBy === "A" && b.bnc === 1 && b.vz < 0 && b.z < P.z + REACH) {                             // the ball is in front of you: it is a hit if it is under your racket on the screen
+    const s = Math.hypot(P.vx, P.vy, P.vz), pb = proj(b.x, b.y, b.z), pc = proj(P.x, P.y, P.z), dx = pb.x - pc.x, dy = pb.y - pc.y, d = Math.hypot(dx, dy), rz = P.rpx + pb.k * R * .6;
+    const passing = d >= b.dPrev; b.dPrev = d;                                                        // a swing meets the ball where it comes closest to the racket's centre, not at the first touch of the edge
+    if (d < rz && (s > S_ACTIVE ? d < rz * .4 || passing || b.z <= P.z + .12 : b.z <= P.z + .12) && playerHit({ x: dx / P.rpx, y: -dy / P.rpx }, false)) return;   // a quick swing meets it early; otherwise your racket waits for it
+    if (b.z < Math.min(P.z, -PL) - LATE) { point("A", "you missed"); return; }
+  }
+  if (b.hitBy === "P" && b.bnc === 1 && pz <= AI.hz && b.z > AI.hz) {                               // reaching the CPU's racket
+    const f = (AI.hz - pz) / (b.z - pz), xc = px + (b.x - px) * f, yc = py + (b.y - py) * f;
+    if (Math.hypot(xc - AI.x, yc - AI.y) < PR + R) { b.x = xc; b.y = yc; b.z = AI.hz; aiHit(false); } else point("P", "CPU missed");
+    return;
+  }
+  if (b.bnc === 0 && (b.hitBy === "P" ? b.z > TL / 2 + .12 : b.z < -TL / 2 - .12)) fault(b.hitBy, "out");   // flew past the end of the table without touching it
+  if (b.y < TT - .6) { if (b.bnc === 0) fault(b.hitBy, "out"); else point(b.hitBy, b.hitBy === "P" ? "CPU missed" : "you missed"); }
+}
+function bounce(side) {
+  rings.push({ x: B.x, z: B.z, life: .4 }); SND.bounce();
+  if (G.state !== "rally") return;
+  const hit = B.hitBy, other = hit === "P" ? "A" : "P"; B.bnc++;
+  if (B.bnc === 1) { if (side !== other) fault(hit, "own"); }                  // the first bounce must be on the other side
+  else point(hit, other === "A" ? "CPU missed" : "you missed");                 // a second bounce: not returned
+}
+const FAULT = { out: "went out", net: "hit the net", own: "bounced on its own side" };
+const fault = (who, what) => point(who === "P" ? "A" : "P", `${who === "P" ? "your shot" : "CPU's shot"} ${FAULT[what]}`);
+
+/* ═══════════ Rules & match flow ═══════════ */
+function serverFor(total) {                        // two serves each, then one each from 10-10
+  const s0 = G.startServer === "P" ? 0 : 1, i = total < 20 ? Math.floor(total / 2) % 2 : (total - 20) % 2;
+  return (s0 ^ i) === 0 ? "P" : "A";
+}
+function point(winner, why) {
+  if (G.state !== "rally") return;
+  const wi = winner === "P" ? 0 : 1; G.score[wi]++; G.state = "point"; G.pointT = G.t;
+  G.msg = `${winner === "P" ? "Point for you" : "Point for CPU"} · ${why}`; G.msgT = G.t;
+  const [p, a] = G.score;
+  if ((p >= C.WIN || a >= C.WIN) && Math.abs(p - a) >= 2) { G.won = p > a; SND.fanfare(G.won); } else if (winner === "P") SND.win(); else SND.lose();
+}
+function setupServe() {
+  G.state = "serve"; G.server = serverFor(G.score[0] + G.score[1]); G.rally = 0; B.live = false; B.hitBy = null; B.trail = []; AI.plan = null; AI.hz = PL; G.path = null;
+  if (G.server === "A") { G.aiServeAt = G.t + 1.3; AI.plan = { x: 0, y: 1.3, z: PL, t: G.t }; }
+}
+function resetMatch() { G.score = [0, 0]; G.startServer = "P"; G.rally = 0; G.msg = ""; G.won = false; G.feed = []; }
+function hoverBall(side) { B.live = false; B.x = 0; B.y = 1.3 + .02 * Math.sin(G.t * 3); B.z = side === "P" ? -PL : PL; B.vx = B.vy = B.vz = 0; B.wx = B.wy = B.wz = 0; B.m = [1, 0, 0, 0, 1, 0, 0, 0, 1]; }
+
+/* ═══════════ Your racket meets the ball: real physics ═══════════ */
+function racketContact(o, m, serve, noisy) {       // m: where on the racket the ball touched (-1..1 of the hit zone). Changes the ball o; returns which side hit and how hard you swung
+  const U = { x: P.vx, y: P.vy, z: P.vz }, s2 = Math.hypot(U.x, U.y);
+  U.z = Math.max(U.z, (P.src === "mouse" ? .6 : AIDS[G.aid].fwd) * s2);         // a stroke also travels forward; when the camera can't see that, a little is assumed (none in pro)
+  const swing = len(U);
+  // which side meets the ball: the one it is flying into (on a serve, the one facing the table)
+  const rel = dot(sub({ x: o.vx, y: o.vy, z: o.vz }, U), P.N), side = serve ? (P.N.z >= 0 ? 1 : -1) : (rel < 0 ? 1 : -1);
+  let N = mul(P.N, side);
+  const off = Math.hypot(m.x, m.y) * AIDS[G.aid].hit;                           // past 1 = on the rim: the face tips toward the edge it was touched on
+  if (off > 1) { const t = Math.min(.35, (off - 1) * .9) * (noisy ? rnd(.6, 1.3) : 1); N = nrm({ x: N.x + m.x * t, y: N.y + m.y * t, z: N.z }); }
+  // your hand speed in the game ball's scale: the push along the face (power) and the brush across it (spin)
+  const un = dot(U, N);
+  let V = add(mul(N, un * C.POWER), sub(U, mul(N, un)), C.BRUSH);
+  if (serve) { const need = C.SERVE_PUSH - dot(V, N); if (need > 0) V = add(V, N, need); }
+  const ok = contact(o, N.x, N.y, N.z, C.E_PAD, C.MU_PAD, V.x, V.y, V.z, C.ET_PAD);
+  return { ok, fh: side > 0, swing };
+}
+function assistShot(o, tol) {                      // where the shot goes; with the assist, a shot that misses the table by less than tol is steered onto it (same spin, about the same pace)
+  const r = simShot(o, { x: o.vx, y: o.vy, z: o.vz });
+  if (!r) return { k: "miss", x: o.x, z: TL };
+  const own = r.yNet === null;                                                     // it comes down on your own side
+  const short = own ? .5 * (.15 - r.z) : Math.max(0, TT + NH + R + .005 - r.yNet);  // how far below the top of the net it crosses (or how far short of the net it lands)
+  const ex = Math.max(0, Math.abs(r.x) - TW / 2), ez = own ? 0 : r.z <= 0 ? .05 - r.z : Math.max(0, r.z - TL / 2);   // how far off the table it lands
+  if (short === 0 && ex === 0 && ez === 0) return { k: "clean", x: r.x, z: r.z };
+  const xm = TW / 2 - .07, tx = clamp(r.x, -xm, xm), tz = clamp(r.z, .2, TL / 2 - .1);
+  if (Math.hypot(ex, ez, 2 * short) > tol) return { k: "miss", x: r.x, z: r.z, net: short > 0 };
+  return { k: "saved", x: tx, z: tz, T: clamp(r.t, .35, 1.6) };
+}
+function steer(o, a) {
+  const w0 = { wx: o.wx, wy: o.wy, wz: o.wz };
+  for (let sc = 1; sc > -.1; sc -= .25) {          // if the spin makes the shot impossible, take some off
+    o.wx = w0.wx * sc; o.wy = w0.wy * sc; o.wz = w0.wz * sc;
+    const res = solveShot(o, a.x, a.z, a.T); if (res.ok) { o.vx = res.v.x; o.vy = res.v.y; o.vz = res.v.z; return true; }
+  }
+  Object.assign(o, w0); return false;
+}
+function nameShot(swing, o) {                      // what the shot turned out to be, from its spin and speed
+  const sp = Math.hypot(o.vx, o.vy, o.vz), top = o.wx, side = o.wy;
+  if (swing < S_BLOCK) return "block";
+  if (o.y > 1.3 && sp > 5 && o.vy < .3) return "smash";
+  if (Math.abs(side) > 55 && Math.abs(side) > Math.abs(top) * .8) return "curve";
+  if (top > 75) return "loop";
+  if (top > 30) return o.vy > 2 ? "lift" : "drive";
+  if (top < -80) return "chop";
+  if (top < -25) return "push";
+  return "drive";
+}
+function playerHit(m, serve) {
+  const hit = racketContact(B, m, serve, true);
+  if (!hit.ok) return false;
+  const a = assistShot(B, AIDS[G.aid].tol + (serve ? .35 : 0)), steered = a.k === "saved" && steer(B, a);
+  const kind = nameShot(hit.swing, B);
+  B.live = true; B.hitBy = "P"; B.bnc = 0; G.rally++; B.trail = [];
+  G.feed.unshift({ who: "P", kind, fh: hit.fh, top: B.wx, side: B.wy, steered, t: G.t }); if (G.feed.length > 4) G.feed.length = 4;
+  G.path = null; G.last = { who: "P", kind }; P.flash = 1; P.lunge = Math.max(0, B.z - P.z);
+  SND.hit(true, clamp(hit.swing / 3, 0, 1)); burst(B.x, B.y, B.z, ST[kind].col);
+  return true;
+}
+function preview() {                               // the ring on the table: where the ball would go if it met your racket as you hold it right now
+  G.pv = null;
+  if (!G.guide) return;
+  const serving = G.state === "menu" || G.state === "over" || (G.state === "serve" && G.server === "P");
+  let o = copyBall(B);
+  if (G.state === "rally" && B.hitBy === "A" && B.bnc <= 1) {
+    let bnc = B.bnc, found = false;
+    for (let i = 0; i < 700; i++) { fly(o, HS); if (tableBounce(o)) bnc++; if (bnc > 1 || o.y < .35) return; if (bnc === 1 && o.z <= P.z) { found = true; break; } }
+    if (!found) return;
+  } else if (!serving) return;
+  if (!racketContact(o, { x: 0, y: 0 }, serving, false).ok) return;
+  G.pv = assistShot(o, AIDS[G.aid].tol + (serving ? .35 : 0));
+}
+
+/* ═══════════ The CPU ═══════════ */
+const wpick = w => { let t = 0; for (const k in w) t += w[k]; let r = Math.random() * t; for (const k in w) { r -= w[k]; if (r <= 0) return k; } return Object.keys(w)[0]; };
+function kick(kind, b) {                           // incoming spin bends the CPU's return, unless its stroke is the right answer to it (lift into backspin, block or drive into topspin)
+  const sg = b.vz < 0 ? -1 : 1, topIn = b.wx * sg, sideIn = -b.wy * sg;
+  let cT = LV[G.level].read; const cS = cT;
+  if (topIn < -25 && (kind === "lift" || kind === "loop")) cT = Math.max(cT, .92);
+  else if (topIn > 40 && kind !== "lift" && kind !== "loop" && kind !== "push") cT = Math.max(cT, .85);
+  return { dvx: C.KICK_S * sideIn * (1 - cS), dvy: C.KICK_T * topIn * (1 - cT) };
+}
+function launch(kind, tx, tz, T, top, side) {      // the CPU's shot: tz = distance from the net where the ball should first land, on your half
+  const k = kick(kind, B);
+  let res = null;
+  for (let sc = 1; sc > -.1; sc -= .25) {                      // if so much spin makes the shot impossible (it would float), take some spin off
+    B.wx = -top * sc; B.wy = -side * sc; B.wz = -.45 * side * sc;              // sidespin around the vertical axis bends the ball in the air; a little corkscrew (tilted axis) makes it kick sideways when it lands
+    res = solveShot(B, tx, -tz, T); if (res.ok) { top *= sc; side *= sc; break; }
+  }
+  let v = res.v; if (![v.x, v.y, v.z].every(Number.isFinite)) v = { x: 0, y: 2, z: -3 };
+  B.vx = v.x + k.dvx; B.vy = v.y + k.dvy; B.vz = v.z; B.live = true; B.hitBy = "A"; B.bnc = 0; G.rally++; B.trail = []; B.dPrev = 1e9;
+  G.feed.unshift({ who: "A", kind, top, side, t: G.t }); if (G.feed.length > 4) G.feed.length = 4;
+  G.path = pathFrom(B); G.last = { who: "A", kind };
+}
+function aiPick(serve) {
+  const lv = LV[G.level], topIn = B.wx * (B.vz < 0 ? -1 : 1);
+  if (serve) return wpick({ drive: .3, push: .4, curve: .3 });
+  if (B.y > 1.3 && Math.random() < lv.smash) return "smash";
+  if (topIn < -30) return wpick({ lift: .45, loop: lv.loop * 1.6, push: .25, drive: .1 });              // against backspin: lift
+  if (topIn > 60) return wpick({ block: .45, drive: .3, curve: .1, chop: .15 });                         // against heavy topspin: block
+  return wpick({ drive: .3, loop: lv.loop, push: .2, lift: .1, curve: lv.curve, block: .1, chop: .1 });
+}
+function aiHit(serve) {
+  const lv = LV[G.level], kind = aiPick(serve), a = ST[kind], pw = kind === "block" ? 0 : rnd(.25, 1);
+  let tx = rnd(-.55, .55); if (Math.random() < lv.smart) tx = (P.x > 0 ? -1 : 1) * rnd(.2, .6);        // the better CPUs place the ball away from you
+  tx += rnd(-1, 1) * lv.ex;
+  let tz, T, top = lerp(a.top[0], a.top[1], pw), side = a.side ? (Math.random() < .5 ? -1 : 1) * lerp(a.side[0], a.side[1], pw) : rnd(-20, 20);
+  if (kind === "block") { tz = rnd(.5, .9); T = rnd(.9, 1.1); top = clamp(.35 * B.wx * (B.vz < 0 ? -1 : 1), -70, 70); }
+  else { tz = lerp(a.tz[0], a.tz[1], pw) + rnd(-1, 1) * lv.ez * .5; T = lerp(a.T[0], a.T[1], pw); }
+  T = T * lv.ts - (kind === "lift" ? 0 : Math.min(.1, G.rally * .007));                              // and play faster as the rally goes on
+  if (serve) { tz = rnd(.4, .85); T = Math.max(T, .85); }
+  else if (Math.random() < lv.err) { if (Math.random() < .5) tz = rnd(1.5, 1.9); else tx = (Math.random() < .5 ? -1 : 1) * rnd(.85, 1.1); }   // everybody has bad shots: too long, or too wide
+  launch(kind, tx, tz, T, top, side); AI.flash = 1; AI.plan = null; AI.pitchT = a.pitch; SND.hit(false); burst(B.x, B.y, B.z, ST[kind].col);
+}
+function aiPlan() {                                 // after your shot: where the CPU will meet the ball (stepping back from high balls, in to low ones), plus an error that depends on the level
+  const lv = LV[G.level], o = copyBall(B); let bnc = 0, best = null, bs = 1e9, cross = null;
+  for (let i = 0; i < 1500; i++) {
+    fly(o, HS); if (tableBounce(o)) { bnc++; if (o.z < 0 || bnc > 1) break; }
+    if (o.y < .2 || o.z > PL + 1.4) break;
+    if (bnc === 1 && o.vz > 0 && o.z > TL / 2 - .3) {
+      if (!cross && o.z >= PL) cross = { x: o.x, y: o.y, z: o.z };
+      const sc = Math.abs(o.z - PL) + (o.y > 1.75 ? 4 + o.y : 0) + (o.y < .82 ? 4 + 4 * (1 - o.y) : 0);
+      if (sc < bs) { bs = sc; best = { x: o.x, y: o.y, z: o.z }; }
+    }
+  }
+  const pr = best || cross;
+  if (!pr) { AI.plan = null; AI.hz = PL; return; }
+  AI.hz = pr.z; AI.plan = { x: pr.x + rnd(-1, 1) * lv.ex, y: clamp(pr.y + rnd(-1, 1) * lv.ex, .5, 2.1), z: pr.z, t: G.t + lv.react };
+}
+function moveAI(dt) {
+  const lv = LV[G.level]; let tx = 0, ty = 1.15, tz = PL;
+  if (AI.plan) { if (G.t >= AI.plan.t) { tx = AI.plan.x; ty = AI.plan.y; tz = AI.plan.z; } else { tx = AI.x; ty = AI.y; tz = AI.z; } }
+  const d = Math.hypot(tx - AI.x, ty - AI.y, tz - AI.z), step = lv.v * dt, f = d > step ? step / d : 1;
+  AI.x += (tx - AI.x) * f; AI.y += (ty - AI.y) * f; AI.z += (tz - AI.z) * f;
+  AI.pitch += (AI.pitchT - AI.pitch) * (1 - Math.exp(-dt * 14)); AI.pitchT *= Math.exp(-dt * 1.5);     // its racket tilts for the stroke, then relaxes
+}
+
+/* ═══════════ Update ═══════════ */
+function burst(x, y, z, color) {
+  const p = proj(x, y, z);
+  for (let i = 0; i < 14; i++) { const a = rnd(0, TAU), s = rnd(.1, .5) * H; sparks.push({ x: p.x, y: p.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, ttl: rnd(.25, .5), color }); }
+}
+function update(dt, now) {
+  if (G.paused) return;
+  G.t += dt; P.flash = Math.max(0, P.flash - dt * 5); AI.flash = Math.max(0, AI.flash - dt * 5);
+  moveRacket(dt); moveAI(dt);
+  const st = G.state;
+  if (st === "menu" || st === "over" || (st === "serve" && G.server === "P")) {
+    hoverBall("P");
+    const pb = proj(B.x, B.y, B.z), pc = proj(P.x, P.y, P.z), dx = pb.x - pc.x, dy = pb.y - pc.y;
+    if (Math.hypot(dx, dy) < P.rpx + pb.k * R * .6 && Math.hypot(P.vx, P.vy, P.vz) > C.SERVE_V) {            // a quick swing through the ball: serve
+      if (st !== "serve") resetMatch();
+      G.state = "rally"; G.rally = 0; if (playerHit({ x: dx / P.rpx, y: -dy / P.rpx }, true)) aiPlan(); else G.state = st;
+    }
+  } else if (st === "serve") {
+    hoverBall("A"); AI.x += (B.x - AI.x) * Math.min(1, dt * 6); AI.y += (B.y - AI.y) * Math.min(1, dt * 6);
+    if (G.t >= G.aiServeAt) { G.state = "rally"; G.rally = 0; aiHit(true); }
+  } else if (st === "point" && G.t - G.pointT > 1.6) {
+    const [p, a] = G.score;
+    if ((p >= C.WIN || a >= C.WIN) && Math.abs(p - a) >= 2) { G.state = "over"; B.live = false; B.hitBy = null; B.trail = []; G.path = null; } else setupServe();
+  }
+  if (B.live) {
+    G.acc += dt; let n = 0;
+    while (G.acc >= HS && n++ < 60) { G.acc -= HS; const hb = B.hitBy; stepBall(HS); if (B.hitBy !== hb && B.hitBy === "P") aiPlan(); if (!B.live) break; }
+    if (n >= 60) G.acc = 0;
+    B.trail.push({ x: B.x, y: B.y, z: B.z }); if (B.trail.length > 9) B.trail.shift();
+    spinBall(dt);
+  } else G.acc = 0;
+  preview();
+  sparks.forEach(s => { s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt / s.ttl; }); sparks = sparks.filter(s => s.life > 0);
+  rings.forEach(r => r.life -= dt); rings = rings.filter(r => r.life > 0);
+}
+
+/* ═══════════ Drawing ═══════════ */
+const poly = (pts, fill) => { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath(); if (fill) { ctx.fillStyle = fill; ctx.fill(); } };
+const seg = (a, b) => { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); };
+function text(s, x, y, size, color, alpha = 1, weight = 300) { ctx.font = `${weight} ${size}px ${FONT}`; ctx.fillStyle = color; ctx.globalAlpha = alpha; ctx.fillText(s, x, y); ctx.globalAlpha = 1; }
+
+/* A racket in 3D: a disc around centre c, its palm face pointing along N, the handle away from 'up'. You see whichever face points at the camera:
+   from behind your forehand you see the black back, and opening the face shows more of the red */
+function drawRacket(c, N, up, rim, flash) {
+  let e2 = sub(up, mul(N, dot(up, N))); if (len(e2) < .05) e2 = sub({ x: 0, y: 1, z: 0 }, mul(N, N.y)); if (len(e2) < .05) e2 = { x: 1, y: 0, z: 0 };
+  e2 = nrm(e2); const e1 = cross(e2, N);
+  const disc = (off, rad) => { const pts = []; for (let i = 0; i < 36; i++) { const a = i / 36 * TAU, p = add(add(add(c, N, off), e1, Math.cos(a) * rad), e2, Math.sin(a) * rad); pts.push(proj(p.x, p.y, p.z)); } return pts; };
+  const palmSeen = dot(N, sub(CAM, c)) > 0, th = .009, near = palmSeen ? th : -th, pc = proj(c.x, c.y, c.z);
+  if (pc.zc < .3) return;
+  const h0 = add(c, e2, -PR * .82), h1 = add(c, e2, -PR - .1), hw = .017, q = p => proj(p.x, p.y, p.z);
+  poly([q(add(h0, e1, hw)), q(add(h1, e1, hw * 1.15)), q(add(h1, e1, -hw * 1.15)), q(add(h0, e1, -hw))], "#c89b5c");
+  ctx.globalCompositeOperation = "lighter"; ctx.strokeStyle = rim; ctx.globalAlpha = .5; ctx.lineWidth = Math.max(2, pc.k * .012); ctx.lineJoin = "round";
+  poly(disc(near, PR * 1.03)); ctx.stroke(); ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = .88; poly(disc(-near, PR), "#a8773d");                       // the far face: its wooden edge shows when the racket is turned (slightly see-through, so the ball behind it stays visible)
+  const face = disc(near, PR); poly(face);
+  const g = ctx.createRadialGradient(pc.x - pc.k * PR * .3, pc.y - pc.k * PR * .35, pc.k * PR * .1, pc.x, pc.y, pc.k * PR * 1.1);
+  if (palmSeen) { g.addColorStop(0, "#ff6b7d"); g.addColorStop(1, "#a50f26"); } else { g.addColorStop(0, "#3a3446"); g.addColorStop(1, "#0f0c14"); }
+  ctx.fillStyle = g; ctx.fill();
+  if (flash) { ctx.fillStyle = "#fff"; ctx.globalAlpha = .55; ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = palmSeen ? "rgba(255,255,255,.3)" : "rgba(255,255,255,.18)"; ctx.lineWidth = Math.max(1, pc.k * .004); ctx.stroke();
+}
+function faceWord() {                              // the face pointing at the table: forehand or backhand, open or closed, turned left or right
+  const fh = P.N.z >= 0, f = fh ? P.N : mul(P.N, -1);
+  const pitch = Math.asin(clamp(f.y, -1, 1)) / DEG, yaw = Math.atan2(f.x, f.z) / DEG;
+  const a = Math.abs(pitch) < 8 ? "flat" : `${pitch > 0 ? "open" : "closed"} ${Math.round(Math.abs(pitch) / 5) * 5}°`;
+  return [`${fh ? "FH" : "BH"} · ${a}${Math.abs(yaw) > 12 ? (yaw > 0 ? " →" : " ←") : ""}`, fh ? "#ff8a9a" : "#cfc6e6"];
+}
+function drawBall() {
+  const p = proj(B.x, B.y, B.z); if (p.zc < .3) return;
+  const r = Math.max(2.5, p.k * R);
+  ctx.globalCompositeOperation = "lighter"; ctx.lineCap = "round";
+  for (let i = 1; i < B.trail.length; i++) {
+    const a = proj(B.trail[i - 1].x, B.trail[i - 1].y, B.trail[i - 1].z), b = proj(B.trail[i].x, B.trail[i].y, B.trail[i].z), f = i / B.trail.length;
+    if (a.zc < .3 || b.zc < .3) continue; ctx.strokeStyle = "#ffb35c"; ctx.globalAlpha = f * .35; ctx.lineWidth = Math.max(1.5, r * 1.4 * f); seg(a, b);
+  }
+  const gl = ctx.createRadialGradient(p.x, p.y, r * .5, p.x, p.y, r * 3.2); gl.addColorStop(0, "rgba(255,179,92,.35)"); gl.addColorStop(1, "rgba(255,179,92,0)"); ctx.globalAlpha = 1; ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.2, 0, TAU); ctx.fill();
+  ctx.globalCompositeOperation = "source-over";
+  const g = ctx.createRadialGradient(p.x - r * .35, p.y - r * .35, r * .1, p.x, p.y, r); g.addColorStop(0, "#fffaf0"); g.addColorStop(.5, "#ffc27a"); g.addColorStop(1, "#ff8a2b");
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+  if (r > 6) seam(p, r);
+}
+function seam(p, r) {                              // two circles painted on the ball turn with its spin, so you can see which way it spins
+  const m = B.m; ctx.save(); ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.clip();
+  ctx.strokeStyle = "rgba(120,40,0,.6)"; ctx.lineWidth = Math.max(1, r * .1); ctx.lineCap = "round";
+  for (let c = 0; c < 2; c++) {
+    let pen = false; ctx.beginPath();
+    for (let i = 0; i <= 28; i++) {
+      const a = i / 28 * TAU, ca = Math.cos(a), sa = Math.sin(a), bx = c ? 0 : ca, by = c ? ca : sa, bz = c ? sa : 0;
+      const wx = m[0] * bx + m[1] * by + m[2] * bz, wy = m[3] * bx + m[4] * by + m[5] * bz, wz = m[6] * bx + m[7] * by + m[8] * bz;
+      if (wz < .05) { const X = p.x + r * wx, Y = p.y - r * wy; if (pen) ctx.lineTo(X, Y); else { ctx.moveTo(X, Y); pen = true; } } else pen = false;
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function spinWord(top, side) {
+  const a = []; if (top > 25) a.push("topspin"); else if (top < -25) a.push("backspin");
+  if (Math.abs(side) > 25) a.push(side > 0 ? "curves right" : "curves left");
+  return a.length ? `${a.join(" + ")} · ${Math.round(Math.hypot(top, side) * 60 / TAU / 50) * 50} rpm` : "flat";
+}
+function draw(now) {
+  ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
+  const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#0c0820"); bg.addColorStop(1, "#06040c"); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  if (showVideo && video.videoWidth) { const { dw, dh } = camGeom(); ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(-1, 1); ctx.globalAlpha = .16; ctx.drawImage(video, -dw / 2, -dh / 2, dw, dh); ctx.restore(); }
+  ctx.textAlign = "center";
+
+  // the floor: a faint grid, for the sense of depth
+  ctx.globalCompositeOperation = "lighter"; ctx.lineWidth = 1; ctx.strokeStyle = "hsl(265,70%,55%)";
+  for (let x = -5; x <= 5; x += .5) { ctx.globalAlpha = .1 - Math.abs(x) * .012; seg(proj(x, 0, -2.3), proj(x, 0, 9)); }
+  for (let z = -2; z <= 9; z += .5) { ctx.globalAlpha = .09 - Math.max(0, z) * .007; seg(proj(-5, 0, z), proj(5, 0, z)); }
+  ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
+
+  // the table
+  const q = proj, nl = q(-TW / 2, TT, -TL / 2), nr = q(TW / 2, TT, -TL / 2), fr = q(TW / 2, TT, TL / 2), fl = q(-TW / 2, TT, TL / 2), mid = q(0, TT, 0);
+  ctx.strokeStyle = "#0b1230"; ctx.lineCap = "butt";
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) { const a = q(sx * .68, TT - .05, sz * 1.2), b = q(sx * .68, 0, sz * 1.2); ctx.lineWidth = a.k * .05; seg(a, b); }
+  poly([nl, nr, q(TW / 2, TT - .06, -TL / 2), q(-TW / 2, TT - .06, -TL / 2)], "#071a40");
+  const tg = ctx.createLinearGradient(0, fl.y, 0, nl.y); tg.addColorStop(0, "#0b2c74"); tg.addColorStop(1, "#1658c2"); poly([nl, nr, fr, fl], tg);
+  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineJoin = "round"; ctx.lineWidth = Math.max(1.5, mid.k * .014); poly([nl, nr, fr, fl]); ctx.stroke();
+  ctx.lineWidth = Math.max(1, mid.k * .006); ctx.globalAlpha = .55; seg(q(0, TT, -TL / 2), q(0, TT, TL / 2)); ctx.globalAlpha = 1;
+  // where the ball bounced: little rings on the table
+  for (const r of rings) { const c = q(r.x, TT, r.z), a = 1 - r.life / .4; ctx.strokeStyle = "#fff"; ctx.globalAlpha = (1 - a) * .6; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(c.x, c.y, c.k * (.03 + .16 * a), c.k * (.03 + .16 * a) * .4, 0, 0, TAU); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  // where your racket would send the ball right now
+  if (G.pv && G.pv.z > -TL / 2 && G.pv.z < 5 && Math.abs(G.pv.x) < 3) {
+    const pv = G.pv, c = q(pv.x, TT, pv.z), col = pv.k === "clean" ? "#7dffb0" : pv.k === "saved" ? "#ffd84d" : "#ff4d6d", rr = c.k * .07;
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.globalAlpha = .75; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, rr, rr * .4, 0, 0, TAU); ctx.stroke(); ctx.beginPath(); ctx.arc(c.x, c.y, 2, 0, TAU); ctx.fill();
+    if (pv.k === "miss") text(pv.net ? "net" : "out", c.x, c.y - rr * .8, 12, col, .8, 600);
+    ctx.globalAlpha = 1;
+  }
+  // the ball's shadow on the table (or the floor): the best clue to how high the ball is
+  {
+    const onTable = Math.abs(B.x) < TW / 2 && Math.abs(B.z) < TL / 2 && B.y > TT - .02, sy = onTable ? TT : 0, c = q(B.x, sy, B.z), h = B.y - sy;
+    ctx.fillStyle = "#000"; ctx.globalAlpha = clamp(.55 - h * .25, .12, .5); ctx.beginPath(); ctx.ellipse(c.x, c.y, Math.max(2, c.k * R * 1.3), Math.max(1, c.k * R * .5), 0, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+  }
+  // the CPU, the ball (before or after the net, depending on where it is), the net, then your racket on top
+  drawRacket({ x: AI.x, y: AI.y, z: AI.z }, { x: 0, y: Math.sin(AI.pitch * DEG), z: -Math.cos(AI.pitch * DEG) }, { x: 0, y: 1, z: 0 }, "#4cc9f0", AI.flash > 0);
+  if (B.z > 0) drawBall();
+  const n0 = q(-TW / 2 - .15, TT, 0), n1 = q(TW / 2 + .15, TT, 0), n2 = q(TW / 2 + .15, TT + NH, 0), n3 = q(-TW / 2 - .15, TT + NH, 0);
+  poly([n0, n1, n2, n3], "rgba(215,228,255,.13)");
+  ctx.strokeStyle = "rgba(230,240,255,.22)"; ctx.lineWidth = 1;
+  for (let x = -TW / 2 - .15; x <= TW / 2 + .15; x += .06) seg(q(x, TT, 0), q(x, TT + NH, 0));
+  for (let y = TT + .04; y < TT + NH; y += .04) seg(q(-TW / 2 - .15, y, 0), q(TW / 2 + .15, y, 0));
+  ctx.strokeStyle = "#fff"; ctx.globalAlpha = .9; ctx.lineWidth = Math.max(2, mid.k * .008); seg(n3, n2); ctx.globalAlpha = 1;
+  ctx.strokeStyle = "#cfd6ee"; ctx.lineWidth = Math.max(2, mid.k * .01); seg(n0, n3); seg(n1, n2);
+  const front = B.z < P.z + REACH;                                 // within your reach the ball is drawn over your racket, so you see the touch
+  if (B.z <= 0 && !front) drawBall();
+  if (G.guide && G.path && G.state === "rally" && B.hitBy === "A") {         // the guide: faint dots along the exact path of the ball
+    const el = G.t - G.path.t0; ctx.fillStyle = "#ffd9b0";
+    for (const pt of G.path.pts) { const f = pt.t - el; if (f < .02) continue; if (f > 1.6) break; const c = proj(pt.x, pt.y, pt.z); if (c.zc < .3) continue; ctx.globalAlpha = .34 * (1 - f / 1.6); ctx.beginPath(); ctx.arc(c.x, c.y, Math.max(1.5, c.k * R * .3), 0, TAU); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  }
+  {                                                                             // the swoosh of your swing
+    const sp = Math.hypot(P.vx, P.vy, P.vz);
+    if (sp > 1 && P.hist.length > 2) { ctx.globalCompositeOperation = "lighter"; ctx.lineCap = "round"; ctx.strokeStyle = "#ffd9b0"; for (let i = 1; i < P.hist.length; i++) { const a = P.hist[i - 1], b = P.hist[i], f = i / P.hist.length; ctx.globalAlpha = f * clamp((sp - 1) / 3, 0, 1) * .4; ctx.lineWidth = P.rpx * .5 * f; seg({ x: a.sx, y: a.sy }, { x: b.sx, y: b.sy }); } ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1; }
+  }
+  drawRacket({ x: P.x, y: P.y, z: P.z + P.lunge }, P.N, P.up, "#ff5470", P.flash > 0);
+  if (front) drawBall();
+  if (G.state === "rally" && B.hitBy === "A") {                                 // what spin is on the incoming ball
+    const sg = B.vz < 0 ? -1 : 1, top = B.wx * sg, side = B.wy * sg, p = proj(B.x, B.y, B.z), r = Math.max(2.5, p.k * R);
+    const lab = Math.abs(top) >= Math.abs(side) ? (top > 25 ? ["topspin", "#ff9a4d"] : top < -25 ? ["backspin", "#c9b6ff"] : null) : (Math.abs(side) > 25 ? [side > 0 ? "sidespin →" : "← sidespin", "#6ee7ff"] : null);
+    if (lab && p.zc > .3) text(lab[0], p.x, p.y < H * .2 ? p.y + r * 4.2 : p.y - r * 3.2, 13, lab[1], .9, 600);
+  }
+  ctx.globalCompositeOperation = "lighter";
+  for (const s of sparks) { ctx.globalAlpha = clamp(s.life, 0, 1); ctx.fillStyle = s.color; ctx.beginPath(); ctx.arc(s.x, s.y, Math.max(1.5, H * .004 * s.life), 0, TAU); ctx.fill(); }
+  ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
+
+  if (G.guide && G.state !== "point") {                                         // your racket's face: forehand / backhand and its angle
+    const [w, col] = faceWord(), c = proj(P.x, P.y + PR * 1.45, P.z);
+    text(w, c.x, c.y, 14, col, .85, 600);
+  }
+  ctx.textAlign = "left";                                                       // the last strokes: who played what, and the spin it carries
+  G.feed.forEach((f, i) => {
+    const a = clamp(5 - (G.t - f.t), 0, 1); if (a <= 0) return; const y = H * .3 + i * 50, s = ST[f.kind];
+    text(`${f.who === "P" ? "YOU" : "CPU"} · ${f.who === "P" ? (f.fh ? "FH " : "BH ") : ""}${s.n}`, 28, y, 17, s.col, a * .95, 600);
+    text(spinWord(f.top, f.side) + (f.steered ? " · assisted" : ""), 28, y + 20, 13, "#a79cc4", a * .85, 400);
+  });
+  ctx.textAlign = "center";
+  // HUD
+  const st = G.state, serving = st === "serve" || st === "rally" || st === "point";
+  if (serving || st === "over") {
+    const y = H * .1, dx = H * .11;
+    text(String(G.score[0]), W / 2 - dx, y, H * .085, "#ffd9b0", .95); text(":", W / 2, y - H * .005, H * .07, "#a79cc4", .6); text(String(G.score[1]), W / 2 + dx, y, H * .085, "#ffd9b0", .95);
+    text("YOU", W / 2 - dx, y + 24, 13, "#ff7a8a", .85, 600); text("CPU", W / 2 + dx, y + 24, 13, "#7ad8ff", .85, 600);
+    if (serving) { ctx.fillStyle = "#ffd9b0"; ctx.globalAlpha = .9; ctx.beginPath(); ctx.arc(W / 2 + (G.server === "P" ? -dx : dx), y + 38, 3.5, 0, TAU); ctx.fill(); ctx.globalAlpha = 1; }
+    if (st === "rally" && G.rally > 2) text(`rally ${G.rally}`, W / 2, y + 62, 14, "#a79cc4", .6);
+  }
+  const age = G.t - G.msgT;
+  if (G.msg && st !== "serve" && st !== "over" && age < 2.4) text(G.msg, W / 2, H * .2, H * .034, "#ffd9b0", clamp(2.4 - age, 0, 1), 400);
+  if (st === "menu" || st === "over") {
+    const menu = st === "menu";
+    text(menu ? "AIR PING PONG" : G.won ? "YOU WIN" : "YOU LOSE", W / 2, H * (menu ? .125 : .215), H * (menu ? .09 : .07), "#ffd9b0", .95);
+    if (menu) text(landmarker && !P.calibrated ? "show your open palm to the camera, like a high five" : "palm = red forehand · back of the hand = black backhand", W / 2, H * .125 + H * .055, 18, landmarker && !P.calibrated ? "#ffd84d" : "#a79cc4", .9);
+    const c = proj(B.x, B.y, B.z); text(menu ? "swing quickly through the ball to serve" : "swing through the ball to play again", W / 2, c.y + c.k * .13, 18, "#ffd9b0", .7 + .25 * Math.sin(now / 300));
+  } else if (st === "serve") {
+    const c = proj(B.x, B.y, B.z);
+    if (G.server === "P") text("your serve: swing quickly through the ball", W / 2, c.y + c.k * .13, 17, "#ffd9b0", .7 + .25 * Math.sin(now / 300)); else text("CPU serves", W / 2, H * .2, 20, "#7ad8ff", .8);
+  }
+  if (landmarker && now - lastHand > 1500) text("I can't see your hand: hold it up in front of the camera", W / 2, H * .93, 16, "#ff9a7a", .9);
+  if (G.paused) { ctx.fillStyle = "rgba(6,4,12,.7)"; ctx.fillRect(0, 0, W, H); text("paused · press P", W / 2, H / 2, H * .06, "#ffd9b0", .95); }
+  ctx.textAlign = "left"; text(`level ${LV[G.level].n} (1 2 3) · assist ${AIDS[G.aid].n} (A) · guides ${G.guide ? "on" : "off"} (R) · H other hand · B swap palm/back · V camera · M ${SND.muted ? "unmute" : "mute"} · P pause · F full screen${P.src === "mouse" ? " · wheel / ↑↓ face angle" : ""}`, 14, H - 12, 13, "#a79cc4", .5, 400);
+}
+
+/* ═══════════ Loop ═══════════ */
+function frame(tMs) {
+  try { body(tMs); } catch (e) { console.error(e); }
+  requestAnimationFrame(frame);
+}
+function body(tMs) {
+  const dt = Math.min(.05, (tMs - (frame.last || tMs)) / 1000 || .016); frame.last = tMs;
+  const now = performance.now();
+  if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) { lastVideoTime = video.currentTime; onDetect(landmarker.detectForVideo(video, now), now); }
+  update(dt, now); draw(now);
+}
+
+/* ═══════════ Mouse (works alongside the camera) & keys ═══════════ */
+canvas.addEventListener("pointermove", e => { P.tx = e.clientX; P.ty = e.clientY; if (performance.now() - lastHand > 600) P.src = "mouse"; });
+canvas.addEventListener("wheel", e => { e.preventDefault(); P.mPitch = clamp(P.mPitch - Math.sign(e.deltaY) * 5, -60, 75); }, { passive: false });
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === "v") showVideo = !showVideo;
+  else if (k === "m") SND.muted = !SND.muted;
+  else if (k === "p") G.paused = !G.paused;
+  else if (k === "r") G.guide = !G.guide;
+  else if (k === "a") G.aid = (G.aid + 1) % AIDS.length;
+  else if (k === "h") { P.lefty = !P.lefty; P.seen = 0; P.calibrated = false; P.votes = []; }
+  else if (k === "b") { P.flip = -P.flip; P.calibrated = true; }
+  else if (k === "arrowup") { P.mPitch = clamp(P.mPitch + 5, -60, 75); e.preventDefault(); }
+  else if (k === "arrowdown") { P.mPitch = clamp(P.mPitch - 5, -60, 75); e.preventDefault(); }
+  else if (k === "1" || k === "2" || k === "3") G.level = +k - 1;
+  else if (k === "f") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); }
+});
+document.addEventListener("visibilitychange", () => { if (document.hidden) G.paused = true; });
+window.APP = { G, B, P, AI, C };                       // for poking around in the console
+
+/* ═══════════ Start ═══════════ */
+async function begin(withCamera) {
+  const st = document.getElementById("status"), b1 = document.getElementById("start"), b2 = document.getElementById("mouse"); b1.disabled = b2.disabled = true;
+  try {
+    st.textContent = "Starting audio…"; await SND.start();
+    if (withCamera) {
+      st.textContent = "Requesting camera…";
+      video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false });
+      await video.play();
+      st.textContent = "Loading hand model…"; landmarker = await makeLandmarker(); P.src = "hand";
+    }
+    document.getElementById("overlay").remove(); requestAnimationFrame(frame);
+  } catch (e) { console.error(e); b1.disabled = b2.disabled = false; st.textContent = "Could not start: " + (e.message || e) + ". Open this file through http://localhost or https and allow the camera, or play with the mouse."; }
+}
+document.getElementById("start").addEventListener("click", () => begin(true));
+document.getElementById("mouse").addEventListener("click", () => begin(false));
+</script>
+</body>
+</html>
