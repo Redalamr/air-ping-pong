@@ -1,6 +1,6 @@
 # Air Ping Pong: phone as the racket
 
-The laptop runs the game. Your phone's gyroscope gives the racket angle and swing, and the racket positions itself.
+The laptop runs the game. Your phone's gyroscope gives the racket angle and swing, and your thumb moves it left and right along your end of the table.
 
 ## Run
 
@@ -30,10 +30,11 @@ The server makes a new certificate each time it starts, so both devices ask you 
 | Held still | Block |
 | Quick forward wrist flick | Drive |
 | Phone tilted sideways, brushed upward | Topspin |
+| Thumb sliding on the **MOVE** pad | Racket travels left and right |
 
 The swing comes from wrist rotation around the bottom of the phone. A phone held perfectly vertical can't produce upward racket speed, so tilt its top about 45 to 60 degrees to the side for topspin.
 
-The racket turns around your wrist, so its head follows the top of the phone. As the ball arrives, the head eases back to the automatic hit position.
+Slide your thumb toward your right to go right, whichever way the phone faces. The racket's height follows the ball automatically. A ring shows where the ball will arrive and turns green when your racket is there. Once you are close, the racket snaps onto the ball (less on higher assist levels, not at all on `pro`). The racket also turns around your wrist, so tilting the phone adds some reach.
 
 Keys: **T** switches between phone and hand/mouse, **D** shows the debug HUD, **X** flips left and right if your phone reports them reversed. The original keys still work.
 

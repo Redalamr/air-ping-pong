@@ -15,17 +15,20 @@
   #bar span { color:var(--dim); }
   button { flex:1; min-height:140px; width:100%; border:0; border-radius:18px; font-family:inherit; font-size:30px; font-weight:700; line-height:1.2; color:#1c0d02; background:var(--glow); }
   button:active { filter:brightness(.8); }
-  #recenter { display:none; background:#2a2140; color:var(--ink); border:2px solid var(--glow); }
+  #recenter { display:none; flex:none; min-height:88px; font-size:22px; background:#2a2140; color:var(--ink); border:2px solid var(--glow); }
+  #pad { display:none; flex:1; min-height:170px; align-items:center; justify-content:center; flex-direction:column; gap:6px; border:2px dashed #5a4d78; border-radius:18px; background:#171127; color:var(--dim); text-align:center; touch-action:none; }
+  #pad b { font-size:26px; color:var(--ink); } #pad.on { border-color:var(--glow); background:#241a38; }
   #recenter small { display:block; margin-top:6px; font-size:14px; font-weight:400; color:var(--dim); }
   #recenter.done { border-color:var(--ok); }
   #nums { font:12px/1.5 ui-monospace,Consolas,monospace; color:var(--dim); white-space:pre; overflow:hidden; }
-  #log { height:22vh; min-height:96px; margin:0; padding:8px; overflow:auto; border-radius:10px; background:#120e20; color:var(--dim); font:11px/1.45 ui-monospace,Consolas,monospace; white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
+  #log { height:13vh; min-height:72px; margin:0; padding:8px; overflow:auto; border-radius:10px; background:#120e20; color:var(--dim); font:11px/1.45 ui-monospace,Consolas,monospace; white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
 </style>
 </head>
 <body>
 <div id="bar"><div id="conn" role="status">not connected</div><span id="hz">0 Hz</span><span id="lat">-- ms</span></div>
 <button id="start">Start</button>
 <button id="recenter">RECENTER<small>hold upright, screen facing you, top up, then tap</small></button>
+<div id="pad"><b>◀ MOVE ▶</b><span>slide your thumb here to move the racket</span></div>
 <div id="nums"></div>
 <pre id="log" aria-label="Log"></pre>
 
@@ -33,7 +36,7 @@
 const $ = id => document.getElementById(id);
 const room = (new URLSearchParams(location.search).get("room") || "").toUpperCase();
 let ws = null, audio = null, wakeLock = null, started = false, retry = 500;
-let ori = { alpha: null, beta: null, gamma: null }, sent = 0, events = 0, rtt = null, peer = false, last = null, peak = 0, peakT = 0, flickT = 0, flickPeak = 0;
+let ori = { alpha: null, beta: null, gamma: null }, sent = 0, events = 0, rtt = null, peer = false, last = null, peak = 0, peakT = 0, flickT = 0, flickPeak = 0, dragX = 0, dragY = 0;
 
 function log(...a) {
   const el = $("log"), line = a.map(x => typeof x === "string" ? x : JSON.stringify(x)).join(" ");
@@ -81,7 +84,9 @@ function onMotion(e) {
   events++;
   const rr = e.rotationRate || {}, a = e.acceleration || {};
   last = { t: Math.round(performance.now() * 10) / 10, ori, rr: { alpha: r3(rr.alpha), beta: r3(rr.beta), gamma: r3(rr.gamma) }, acc: { x: r3(a.x), y: r3(a.y), z: r3(a.z) } };
-  if (send({ type: "m", ...last })) sent++;
+  const msg = { type: "m", ...last }, dx = Math.round(dragX * 1e4) / 1e4, dy = Math.round(dragY * 1e4) / 1e4;
+  if (dx || dy) msg.drag = { x: dx, y: dy };
+  if (send(msg)) { sent++; dragX -= dx; dragY -= dy; }   // a slide that couldn't be sent is kept for the next sample
   const mag = Math.hypot(rr.alpha || 0, rr.beta || 0, rr.gamma || 0), now = performance.now();
   if (mag > peak || now - peakT > 2000) { peak = mag; peakT = now; }
   flickPeak = Math.max(flickPeak, mag);
@@ -100,7 +105,7 @@ async function start() {
     if (res.some(r => r && r !== "granted")) { log("Motion permission denied. Allow it in the browser settings, then reload."); return; }
   } catch (e) { log("Permission error:", e.message); return; }
   if (!isSecureContext) { log("This page needs https, or the browser hides the motion sensors."); return; }
-  started = true; $("start").style.display = "none"; $("recenter").style.display = "block";
+  started = true; $("start").style.display = "none"; $("recenter").style.display = "block"; $("pad").style.display = "flex";
   addEventListener("deviceorientation", onOrientation); addEventListener("devicemotion", onMotion);
   setTimeout(() => { if (!events) log("No motion events. In Chrome: Site settings > Motion sensors must be allowed."); else if (ori.alpha === null) log("Motion works but orientation is empty."); }, 1500);
 }
@@ -114,6 +119,22 @@ $("recenter").addEventListener("click", () => {
   if (ori.alpha === null) return log("No orientation data yet: move the phone a little and retry.");
   if (!send({ type: "recenter", ori })) log("Not connected, recenter not sent.");
 });
+// The MOVE pad: slides are sent in the phone's own axes (x = right edge, y = top), in fractions of the screen width
+let dragId = null, lastX = 0, lastY = 0;
+const pad = $("pad");
+pad.addEventListener("pointerdown", e => {
+  if (dragId !== null) return;
+  dragId = e.pointerId; lastX = e.clientX; lastY = e.clientY; pad.classList.add("on"); e.preventDefault();
+  try { pad.setPointerCapture(e.pointerId); } catch {}
+});
+pad.addEventListener("pointermove", e => {
+  if (e.pointerId !== dragId) return;
+  const sx = (e.clientX - lastX) / innerWidth, sy = -(e.clientY - lastY) / innerWidth, a = (screen.orientation?.angle || 0) * Math.PI / 180;   // if the page auto-rotated, undo that
+  lastX = e.clientX; lastY = e.clientY;
+  dragX += Math.cos(a) * sx + Math.sin(a) * sy; dragY += -Math.sin(a) * sx + Math.cos(a) * sy;
+});
+const endDrag = e => { if (e.pointerId === dragId) { dragId = null; pad.classList.remove("on"); } };
+pad.addEventListener("pointerup", endDrag); pad.addEventListener("pointercancel", endDrag);
 
 let sent0 = 0, tHz = performance.now();
 setInterval(() => {
