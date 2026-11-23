@@ -20,6 +20,12 @@
   button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
   button:disabled { opacity:.5; cursor:default; }
   #status { min-height:1.4rem; margin-top:.8rem; color:#ff9a7a; }
+  #phoneBox { display:none; gap:1rem; align-items:center; margin:1rem 0 .2rem; padding:.8rem; border:1px solid #3a3050; border-radius:12px; }
+  #phoneBox.show { display:flex; }
+  #phoneQr { flex:none; width:136px; height:136px; background:#fff; border-radius:6px; }
+  #phoneBox h2 { margin:0; font-size:1.1rem; font-weight:600; } #phoneUrl { color:var(--glow); font-size:.86rem; word-break:break-all; }
+  #phoneState { margin-top:.25rem; font-weight:600; color:#ff9a7a; } #phoneState.on { color:#7dffb0; }
+  #phoneNums { margin:.25rem 0 0; color:var(--dim); font:12px/1.45 ui-monospace,Consolas,monospace; white-space:pre; }
 </style>
 </head>
 <body>
@@ -36,6 +42,7 @@
   <p>The little ring on the table shows where the ball would land if it met your racket as you hold it right now: <b style="color:#7dffb0">green</b> lands, <b style="color:#ffd84d">yellow</b> lands only with the assist, <b style="color:#ff4d6d">red</b> misses. First to 11, two ahead. To serve, swing through the ball floating in front of you.</p>
   <p>When the camera starts, <b>show it your open palm</b> (like a high five) so it learns which side is which.</p>
   <p>Keys: <b>1 2 3</b> CPU level · <b>A</b> assist (casual, normal, pro = pure physics) · <b>R</b> guides · <b>H</b> other hand · <b>B</b> swap palm and back · <b>V</b> camera · <b>M</b> mute · <b>P</b> pause · <b>F</b> full screen. With the mouse, the wheel or <b>↑ ↓</b> tilt the face.</p>
+  <div id="phoneBox"><img id="phoneQr" alt="QR code for the phone controller"><div><h2>Connect your phone</h2><a id="phoneUrl" target="_blank" rel="noopener"></a><div id="phoneState" role="status">waiting for phone…</div><pre id="phoneNums"></pre></div></div>
   <button id="start">Start camera and sound</button><button id="mouse" class="ghost">Play with the mouse instead</button>
   <div id="status" role="status"></div>
 </div></div>
@@ -739,7 +746,54 @@ addEventListener("keydown", e => {
   else if (k === "f") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); }
 });
 document.addEventListener("visibilitychange", () => { if (document.hidden) G.paused = true; });
-window.APP = { G, B, P, AI, C };                       // for poking around in the console
+
+/* ═══════════ Phone link ═══════════
+   Talks to server.js. When the page is opened as a plain file there is no server, and all of this stays off. */
+const PH = {
+  ok: location.protocol !== "file:", ws: null, room: "", connected: false, s: null, n: 0, hz: 0, rtt: null, lastAt: 0, retry: 500,
+  send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
+};
+function phoneConnect() {
+  const ws = PH.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?room=${PH.room}&role=game`);
+  ws.onopen = () => { PH.retry = 500; };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "m") { PH.s = m; PH.n++; PH.lastAt = performance.now(); }
+    else if (m.type === "ping") { PH.rtt = m.rtt; PH.send({ type: "pong", t: m.t }); }
+    else if (m.type === "peer" && m.role === "phone") { PH.connected = m.connected; if (!m.connected) { PH.s = null; PH.hz = 0; PH.rtt = null; } }
+  };
+  ws.onclose = e => { PH.connected = false; PH.s = null; PH.hz = 0; if (e.code !== 4000) { setTimeout(phoneConnect, PH.retry); PH.retry = Math.min(PH.retry * 2, 4000); } };
+}
+const phoneLabel = () => !PH.connected ? "waiting for phone…" : PH.hz > 0 ? `phone connected, ~${Math.round(PH.hz)} Hz` : "phone connected, tap Start on it";
+async function phoneInit() {
+  if (!PH.ok) return;
+  const q = new URLSearchParams(location.search); let room = (q.get("room") || "").toUpperCase();
+  if (!/^[A-Z0-9]{4,8}$/.test(room)) {
+    const abc = "ABCDEFGHJKMNPQRSTUVWXYZ23456789", b = crypto.getRandomValues(new Uint8Array(5));
+    room = Array.from(b, x => abc[x % abc.length]).join(""); q.set("room", room); history.replaceState(null, "", `${location.pathname}?${q}`);
+  }
+  PH.room = room; phoneConnect();
+  let tHz = performance.now(), n0 = 0;
+  setInterval(() => {                                  // the live numbers on the start screen
+    const t = performance.now(), hz = (PH.n - n0) * 1000 / (t - tHz); n0 = PH.n; tHz = t; PH.hz = PH.hz ? PH.hz * .5 + hz * .5 : hz; if (t - PH.lastAt > 1000) PH.hz = 0;
+    const st = document.getElementById("phoneState"); if (!st) return;
+    st.textContent = phoneLabel(); st.classList.toggle("on", PH.connected && PH.hz > 0);
+    const s = PH.s, f = v => v == null ? "--" : v.toFixed(0);
+    document.getElementById("phoneNums").textContent = s ? `orientation  ${f(s.ori.alpha)}  ${f(s.ori.beta)}  ${f(s.ori.gamma)}°\ngyro  ${f(s.rr.alpha)}  ${f(s.rr.beta)}  ${f(s.rr.gamma)} °/s · latency ${PH.rtt == null ? "--" : Math.round(PH.rtt / 2)} ms` : "";
+  }, 250);
+  try {
+    const info = await (await fetch("/info")).json(), local = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+    const base = info.publicUrl || (local ? info.lan[0] : location.origin);
+    if (!base) { document.getElementById("phoneState").textContent = "No Wi-Fi address found: connect to Wi-Fi or use the tunnel (README)"; }
+    else {
+      const url = `${base}/phone.html?room=${room}`, a = document.getElementById("phoneUrl");
+      a.href = url; a.textContent = url; document.getElementById("phoneQr").src = `/qr.svg?text=${encodeURIComponent(url)}`;
+    }
+    document.getElementById("phoneBox").classList.add("show");
+  } catch (e) { console.warn("phone link unavailable", e); }
+}
+phoneInit();
+window.APP = { G, B, P, AI, C, PH };                   // for poking around in the console
 
 /* ═══════════ Start ═══════════ */
 async function begin(withCamera) {

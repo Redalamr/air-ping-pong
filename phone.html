@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#06040c">
+<title>Racket</title>
+<style>
+  :root { --ink:#f2ecff; --dim:#a79cc4; --bg:#06040c; --glow:#ffb35c; --ok:#7dffb0; --bad:#ff7a8a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:15px/1.4 "Segoe UI",system-ui,sans-serif; overscroll-behavior:none; touch-action:manipulation; user-select:none; -webkit-user-select:none; }
+  body { display:flex; flex-direction:column; gap:10px; padding:max(12px,env(safe-area-inset-top)) 12px max(12px,env(safe-area-inset-bottom)); }
+  #bar { display:grid; grid-template-columns:1fr auto auto; gap:12px; align-items:baseline; font-variant-numeric:tabular-nums; }
+  #conn { font-weight:600; color:var(--bad); } #conn.on { color:var(--ok); }
+  #bar span { color:var(--dim); }
+  button { flex:1; min-height:140px; width:100%; border:0; border-radius:18px; font:600 26px/1.2 inherit; font-family:inherit; color:#1c0d02; background:var(--glow); }
+  button:active { filter:brightness(.8); }
+  #nums { font:12px/1.5 ui-monospace,Consolas,monospace; color:var(--dim); white-space:pre; overflow:hidden; }
+  #log { height:22vh; min-height:96px; margin:0; padding:8px; overflow:auto; border-radius:10px; background:#120e20; color:var(--dim); font:11px/1.45 ui-monospace,Consolas,monospace; white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
+</style>
+</head>
+<body>
+<div id="bar"><div id="conn" role="status">not connected</div><span id="hz">0 Hz</span><span id="lat">-- ms</span></div>
+<button id="start">Start</button>
+<div id="nums"></div>
+<pre id="log" aria-label="Log"></pre>
+
+<script>
+const $ = id => document.getElementById(id);
+const room = (new URLSearchParams(location.search).get("room") || "").toUpperCase();
+let ws = null, audio = null, wakeLock = null, started = false, retry = 500;
+let ori = { alpha: null, beta: null, gamma: null }, sent = 0, events = 0, rtt = null, peer = false, last = null, peak = 0, peakT = 0, flickT = 0;
+
+function log(...a) {
+  const el = $("log"), line = a.map(x => typeof x === "string" ? x : JSON.stringify(x)).join(" ");
+  el.textContent = (el.textContent + new Date().toLocaleTimeString() + " " + line + "\n").slice(-4000); el.scrollTop = el.scrollHeight;
+}
+addEventListener("error", e => log("ERROR", e.message));
+addEventListener("unhandledrejection", e => log("ERROR", String(e.reason && e.reason.message || e.reason)));
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?room=${encodeURIComponent(room)}&role=phone`);
+  ws.onopen = () => { retry = 500; log("WebSocket open"); status(); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "peer" && m.role === "game") { peer = m.connected; log(peer ? "game connected" : "game disconnected"); status(); }
+    else if (m.type === "pong") rtt = performance.now() - m.t;
+  };
+  ws.onerror = () => log("WebSocket error. If this is an iPhone or campus Wi-Fi, use the tunnel (see README).");
+  ws.onclose = e => {
+    peer = false; status();
+    if (e.code === 4000) { log("Replaced by a newer connection"); return; }
+    log(`WebSocket closed (${e.code}), retrying`); setTimeout(connect, retry); retry = Math.min(retry * 2, 4000);
+  };
+}
+const isOpen = () => ws && ws.readyState === WebSocket.OPEN;
+function send(m) { if (isOpen() && ws.bufferedAmount < 8192) { ws.send(JSON.stringify(m)); return true; } return false; }
+function status() {
+  const c = $("conn"), ok = isOpen() && peer;
+  c.textContent = !isOpen() ? "connecting…" : peer ? "connected to game" : "waiting for game"; c.classList.toggle("on", ok);
+}
+
+const r3 = v => v == null ? null : Math.round(v * 1000) / 1000;
+function onOrientation(e) { ori = { alpha: r3(e.alpha), beta: r3(e.beta), gamma: r3(e.gamma) }; }
+function onMotion(e) {
+  events++;
+  const rr = e.rotationRate || {}, a = e.acceleration || {};
+  last = { t: Math.round(performance.now() * 10) / 10, ori, rr: { alpha: r3(rr.alpha), beta: r3(rr.beta), gamma: r3(rr.gamma) }, acc: { x: r3(a.x), y: r3(a.y), z: r3(a.z) } };
+  if (send({ type: "m", ...last })) sent++;
+  const mag = Math.hypot(rr.alpha || 0, rr.beta || 0, rr.gamma || 0), now = performance.now();
+  if (mag > peak || now - peakT > 2000) { peak = mag; peakT = now; }
+  if (mag > 250 && now - flickT > 1200) { flickT = now; setTimeout(() => log(`flick peak: ${Math.round(peak)} deg/s`), 180); }
+}
+
+async function start() {
+  if (started) return;
+  // These must all be called synchronously inside the tap.
+  const asks = [window.DeviceOrientationEvent?.requestPermission?.(), window.DeviceMotionEvent?.requestPermission?.()];
+  try { const AC = window.AudioContext || window.webkitAudioContext; audio = new AC(); audio.resume(); const s = audio.createBufferSource(); s.buffer = audio.createBuffer(1, 1, 22050); s.connect(audio.destination); s.start(); }
+  catch (e) { log("audio:", e.message); }
+  requestWake();
+  try {
+    const res = await Promise.all(asks);
+    if (res.some(r => r && r !== "granted")) { log("Motion permission denied. Allow it in the browser settings, then reload."); return; }
+  } catch (e) { log("Permission error:", e.message); return; }
+  if (!isSecureContext) { log("This page needs https, or the browser hides the motion sensors."); return; }
+  started = true; $("start").textContent = "Streaming…"; $("start").disabled = true;
+  addEventListener("deviceorientation", onOrientation); addEventListener("devicemotion", onMotion);
+  setTimeout(() => { if (!events) log("No motion events. In Chrome: Site settings > Motion sensors must be allowed."); else if (ori.alpha === null) log("Motion works but orientation is empty."); }, 1500);
+}
+async function requestWake() {
+  try { if (navigator.wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); log("screen wake lock on"); } else log("wake lock unavailable: keep the screen on"); }
+  catch (e) { log("wake lock:", e.message); }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && started) { requestWake(); audio?.resume(); } });
+$("start").addEventListener("click", start);
+
+let sent0 = 0, tHz = performance.now();
+setInterval(() => {
+  const now = performance.now(), hz = (sent - sent0) * 1000 / (now - tHz); sent0 = sent; tHz = now;
+  $("hz").textContent = Math.round(hz) + " Hz"; $("lat").textContent = rtt == null ? "-- ms" : Math.round(rtt / 2) + " ms";
+  if (last) {
+    const f = v => (v == null ? "   --" : v.toFixed(0).padStart(5));
+    $("nums").textContent = `ori  a${f(last.ori.alpha)}  b${f(last.ori.beta)}  g${f(last.ori.gamma)}\ngyro x${f(last.rr.alpha)}  y${f(last.rr.beta)}  z${f(last.rr.gamma)} deg/s  peak ${Math.round(peak)}`;
+  }
+}, 500);
+setInterval(() => { if (isOpen()) ws.send(JSON.stringify({ type: "ping", t: performance.now(), rtt })); }, 1000);
+
+if (!/^[A-Z0-9]{4,8}$/.test(room)) { log("Missing room code. Scan the QR code on the laptop."); $("start").disabled = true; }
+else { log("room", room); connect(); }
+</script>
+</body>
+</html>
