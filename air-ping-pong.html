@@ -74,6 +74,7 @@ const C = {
   BRUSH: 1.3,     // and this scales the brush across the face, which is what makes spin
   KICK_T: .0075,  // how strongly incoming topspin / backspin disturbs the CPU's returns
   KICK_S: .006,   // the same for sidespin
+  PHONE_FACE_SMOOTH: 45, // racket angle smoothing with the phone: its gyroscope is much cleaner than the camera, so this can be lighter
 };
 const AIDS = [                                                     // the assist: tol = a shot that misses the table by less than this (m) is steered onto it, keeping its spin and pace; hit = hit-zone size; fwd = forward travel assumed in a swing the camera can't see
   { n: "casual", tol: .75, hit: 1.35, fwd: .5 },
@@ -113,9 +114,10 @@ const len = a => Math.hypot(a.x, a.y, a.z), nrm = a => mul(a, 1 / (len(a) || 1))
 const SND = {
   muted: false,
   async start() {
-    const c = this.c = new AudioContext({ latencyHint: "interactive" }); await c.resume();
+    const c = new AudioContext({ latencyHint: "interactive" });
     const comp = c.createDynamicsCompressor(), m = this.m = c.createGain(); m.gain.value = .55; m.connect(comp); comp.connect(c.destination);
     const n = this.noise = c.createBuffer(1, c.sampleRate, c.sampleRate), d = n.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    this.c = c; await c.resume();                      // set last, so a hit during start-up can't play through a half-built graph
   },
   env(g, t, vol, dur) { g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .004); g.gain.exponentialRampToValueAtTime(.0001, t + dur); },
   tone(f0, f1, dur, vol = .2, type = "sine", at = 0) {
@@ -190,6 +192,7 @@ function camGeom() {                                   // the camera picture as 
 }
 function toScreen(p) { const { dw, dh } = camGeom(); return { x: clamp(W / 2 + dw / 2 - p.x * dw, 0, W), y: clamp(H / 2 - dh / 2 + p.y * dh, 0, H) }; }
 function onDetect(res, now) {
+  if (P.src === "phone") { lastHand = now; return; }   // the phone is driving: the camera must not take the racket back
   const L = res.landmarks || [], WL = res.worldLandmarks || [];
   if (!L.length) return;
   const hs = L.map((lm, i) => { let x = 0, y = 0; for (const j of [0, 5, 9, 9, 13, 17]) { x += lm[j].x / 6; y += lm[j].y / 6; } return { lm, wl: WL[i], p: toScreen({ x, y }) }; });
@@ -228,7 +231,8 @@ function mouseFace() {                                 // the mouse player's fac
 }
 function moveRacket(dt) {                              // smoothed on screen, placed in 3D at its depth, then its velocity
   const k = 1 - Math.exp(-dt * C.SMOOTH); P.sx += (P.tx - P.sx) * k; P.sy += (P.ty - P.sy) * k;
-  const f = P.src === "hand" ? { N: P.tN, up: P.tUp } : mouseFace(), kf = 1 - Math.exp(-dt * C.FACE_SMOOTH);
+  const f = P.src === "hand" || P.src === "phone" ? { N: P.tN, up: P.tUp } : mouseFace(), kf = 1 - Math.exp(-dt * (P.src === "phone" ? C.PHONE_FACE_SMOOTH : C.FACE_SMOOTH));
+  if (P.src === "phone") { if (dot(P.N, f.N) < 0) P.N = f.N; if (dot(P.up, f.up) < 0) P.up = f.up; }   // blending across a half-turn would stall, so a flip is taken at once
   const nN = add(mul(P.N, 1 - kf), f.N, kf); P.N = len(nN) > .05 ? nrm(nN) : f.N;
   const nU = add(mul(P.up, 1 - kf), f.up, kf); P.up = len(nU) > .05 ? nrm(nU) : f.up;
   let zt = 0;                                          // forward / back: the hand growing in the picture means it came closer to the camera, i.e. toward the table
@@ -705,15 +709,18 @@ function draw(now) {
   if (st === "menu" || st === "over") {
     const menu = st === "menu";
     text(menu ? "AIR PING PONG" : G.won ? "YOU WIN" : "YOU LOSE", W / 2, H * (menu ? .125 : .215), H * (menu ? .09 : .07), "#ffd9b0", .95);
-    if (menu) text(landmarker && !P.calibrated ? "show your open palm to the camera, like a high five" : "palm = red forehand · back of the hand = black backhand", W / 2, H * .125 + H * .055, 18, landmarker && !P.calibrated ? "#ffd84d" : "#a79cc4", .9);
+    if (menu && P.src === "phone") text(PH.R0 ? "screen = red forehand · back of the phone = black backhand" : "hold the phone upright, screen facing you, and tap RECENTER", W / 2, H * .125 + H * .055, 18, PH.R0 ? "#a79cc4" : "#ffd84d", .9);
+    else if (menu) text(landmarker && !P.calibrated ? "show your open palm to the camera, like a high five" : "palm = red forehand · back of the hand = black backhand", W / 2, H * .125 + H * .055, 18, landmarker && !P.calibrated ? "#ffd84d" : "#a79cc4", .9);
     const c = proj(B.x, B.y, B.z); text(menu ? "swing quickly through the ball to serve" : "swing through the ball to play again", W / 2, c.y + c.k * .13, 18, "#ffd9b0", .7 + .25 * Math.sin(now / 300));
   } else if (st === "serve") {
     const c = proj(B.x, B.y, B.z);
     if (G.server === "P") text("your serve: swing quickly through the ball", W / 2, c.y + c.k * .13, 17, "#ffd9b0", .7 + .25 * Math.sin(now / 300)); else text("CPU serves", W / 2, H * .2, 20, "#7ad8ff", .8);
   }
-  if (landmarker && now - lastHand > 1500) text("I can't see your hand: hold it up in front of the camera", W / 2, H * .93, 16, "#ff9a7a", .9);
+  if (landmarker && P.src !== "phone" && now - lastHand > 1500) text("I can't see your hand: hold it up in front of the camera", W / 2, H * .93, 16, "#ff9a7a", .9);
+  if (PH.lost) text("phone disconnected: reopen the page on the phone, or keep playing with the mouse", W / 2, H * .89, 16, "#ff9a7a", .9);
+  else if (P.src === "phone" && !PH.R0) text("hold the phone upright, screen facing you, and tap RECENTER", W / 2, H * .89, 16, "#ffd84d", .9);
   if (G.paused) { ctx.fillStyle = "rgba(6,4,12,.7)"; ctx.fillRect(0, 0, W, H); text("paused · press P", W / 2, H / 2, H * .06, "#ffd9b0", .95); }
-  ctx.textAlign = "left"; text(`level ${LV[G.level].n} (1 2 3) · assist ${AIDS[G.aid].n} (A) · guides ${G.guide ? "on" : "off"} (R) · H other hand · B swap palm/back · V camera · M ${SND.muted ? "unmute" : "mute"} · P pause · F full screen${P.src === "mouse" ? " · wheel / ↑↓ face angle" : ""}`, 14, H - 12, 13, "#a79cc4", .5, 400);
+  ctx.textAlign = "left"; text(`level ${LV[G.level].n} (1 2 3) · assist ${AIDS[G.aid].n} (A) · guides ${G.guide ? "on" : "off"} (R) · H other hand · B swap palm/back · V camera · M ${SND.muted ? "unmute" : "mute"} · P pause · F full screen${P.src === "mouse" ? " · wheel / ↑↓ face angle" : ""}${PH.connected ? ` · T ${P.src === "phone" ? "hand/mouse" : "phone"}` : ""}`, 14, H - 12, 13, "#a79cc4", .5, 400);
 }
 
 /* ═══════════ Loop ═══════════ */
@@ -729,7 +736,7 @@ function body(tMs) {
 }
 
 /* ═══════════ Mouse (works alongside the camera) & keys ═══════════ */
-canvas.addEventListener("pointermove", e => { P.tx = e.clientX; P.ty = e.clientY; if (performance.now() - lastHand > 600) P.src = "mouse"; });
+canvas.addEventListener("pointermove", e => { P.tx = e.clientX; P.ty = e.clientY; if (P.src !== "phone" && performance.now() - lastHand > 600) P.src = "mouse"; });
 canvas.addEventListener("wheel", e => { e.preventDefault(); P.mPitch = clamp(P.mPitch - Math.sign(e.deltaY) * 5, -60, 75); }, { passive: false });
 addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
@@ -742,6 +749,7 @@ addEventListener("keydown", e => {
   else if (k === "b") { P.flip = -P.flip; P.calibrated = true; }
   else if (k === "arrowup") { P.mPitch = clamp(P.mPitch + 5, -60, 75); e.preventDefault(); }
   else if (k === "arrowdown") { P.mPitch = clamp(P.mPitch - 5, -60, 75); e.preventDefault(); }
+  else if (k === "t" && PH.connected) { if (P.src === "phone") { PH.userOff = true; P.src = landmarker ? "hand" : "mouse"; P.ls0 = null; } else { PH.userOff = false; P.src = "phone"; } }
   else if (k === "1" || k === "2" || k === "3") G.level = +k - 1;
   else if (k === "f") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); }
 });
@@ -751,18 +759,61 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) G.pau
    Talks to server.js. When the page is opened as a plain file there is no server, and all of this stays off. */
 const PH = {
   ok: location.protocol !== "file:", ws: null, room: "", connected: false, s: null, n: 0, hz: 0, rtt: null, lastAt: 0, retry: 500,
+  R: null, R0: null, w: { x: 0, y: 0, z: 0 }, userOff: false, lost: false,   // R: latest orientation, R0: the recentre pose, w: angular velocity in game axes
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
 };
+let started = false;                                   // the game loop is running
+/* Phone orientation → game axes.
+   Device (W3C, right-handed): x = right edge, y = top, z = out of the screen. R = Rz(alpha)·Rx(beta)·Ry(gamma) maps device → earth.
+   Recentre pose (upright, screen facing you): the right edge points to YOUR right, so x_d = +x_g, y_d = +y_g, z_d = -z_g, hence M = diag(1, 1, -1).
+   The game's axes (x right, y up, z forward) are left-handed, so M is a mirror. That is what makes turning the phone right turn the racket right.
+   Any device vector then maps as v_g = M · R0ᵀ · R · v. The screen is the forehand face: N = v_g(0,0,1), up = v_g(0,1,0).
+   rotationRate is in deg/s with alpha, beta, gamma about the device's x, y, z (unlike orientation angles, where alpha is about z).
+   Angular velocity is a pseudovector, so crossing the wrong way through a mirror flips it: w_g = det(M) · M·R0ᵀ·R · w_d = -(...), which keeps v = w_g × r correct in the game's cross(). */
+const PHONE_M = [1, 1, -1];
+function phonePose(o, rr, R0) {
+  const a = o.alpha * DEG, b = o.beta * DEG, g = o.gamma * DEG, cA = Math.cos(a), sA = Math.sin(a), cB = Math.cos(b), sB = Math.sin(b), cG = Math.cos(g), sG = Math.sin(g);
+  const R = [[cA * cG - sA * sB * sG, -cB * sA, cG * sA * sB + cA * sG], [cG * sA + cA * sB * sG, cA * cB, sA * sG - cA * cG * sB], [-cB * sG, sB, cB * cG]];
+  if (!R0) return { R };
+  const A = [0, 1, 2].map(i => [0, 1, 2].map(j => PHONE_M[i] * (R0[0][i] * R[0][j] + R0[1][i] * R[1][j] + R0[2][i] * R[2][j])));
+  const toGame = v => ({ x: A[0][0] * v.x + A[0][1] * v.y + A[0][2] * v.z, y: A[1][0] * v.x + A[1][1] * v.y + A[1][2] * v.z, z: A[2][0] * v.x + A[2][1] * v.y + A[2][2] * v.z });
+  return { R, N: toGame({ x: 0, y: 0, z: 1 }), up: toGame({ x: 0, y: 1, z: 0 }), w: mul(toGame({ x: (rr?.alpha || 0) * DEG, y: (rr?.beta || 0) * DEG, z: (rr?.gamma || 0) * DEG }), -1) };
+}
+const hasOri = o => o && o.alpha != null && o.beta != null && o.gamma != null;
+function phoneSample(m) {
+  if (!hasOri(m.ori)) return;
+  if (!PH.userOff && P.src !== "phone") P.src = "phone";   // a phone that is streaming takes over (T hands the racket back)
+  PH.lost = false;
+  const pose = phonePose(m.ori, m.rr, PH.R0); PH.R = pose.R;
+  if (PH.R0) { PH.w = pose.w; if (P.src === "phone") { P.tN = pose.N; P.tUp = pose.up; } }
+}
+function phoneRecenter(m) {
+  if (!hasOri(m.ori)) { PH.send({ type: "recentered", ok: false }); return; }
+  PH.R0 = phonePose(m.ori).R; PH.send({ type: "recentered", ok: true });
+  if (!PH.userOff) P.src = "phone";
+  startWithPhone();
+}
+function phoneGone() {
+  PH.connected = false; PH.s = null; PH.hz = 0; PH.rtt = null; PH.R = PH.R0 = null; PH.w = { x: 0, y: 0, z: 0 };   // a reloaded phone restarts its orientation frame, so it must recentre
+  if (P.src === "phone") { P.src = landmarker ? "hand" : "mouse"; P.ls0 = null; PH.lost = true; }
+}
+function startWithPhone() {                            // recentring starts the game with no click on the laptop; its sound waits for the first click or key there (a browser rule)
+  if (started) return; started = true; G.paused = document.hidden;   // a tab switch before the game began shouldn't leave it paused
+  document.getElementById("overlay")?.remove(); requestAnimationFrame(frame);
+  const unlock = () => { removeEventListener("pointerdown", unlock); removeEventListener("keydown", unlock); if (!SND.c) SND.start().catch(console.warn); };
+  addEventListener("pointerdown", unlock); addEventListener("keydown", unlock);
+}
 function phoneConnect() {
   const ws = PH.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?room=${PH.room}&role=game`);
   ws.onopen = () => { PH.retry = 500; };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (m.type === "m") { PH.s = m; PH.n++; PH.lastAt = performance.now(); }
+    if (m.type === "m") { PH.s = m; PH.n++; PH.lastAt = performance.now(); phoneSample(m); }
+    else if (m.type === "recenter") phoneRecenter(m);
     else if (m.type === "ping") { PH.rtt = m.rtt; PH.send({ type: "pong", t: m.t }); }
-    else if (m.type === "peer" && m.role === "phone") { PH.connected = m.connected; if (!m.connected) { PH.s = null; PH.hz = 0; PH.rtt = null; } }
+    else if (m.type === "peer" && m.role === "phone") { if (m.connected) PH.connected = true; else phoneGone(); }
   };
-  ws.onclose = e => { PH.connected = false; PH.s = null; PH.hz = 0; if (e.code !== 4000) { setTimeout(phoneConnect, PH.retry); PH.retry = Math.min(PH.retry * 2, 4000); } };
+  ws.onclose = e => { phoneGone(); if (e.code !== 4000) { setTimeout(phoneConnect, PH.retry); PH.retry = Math.min(PH.retry * 2, 4000); } };
 }
 const phoneLabel = () => !PH.connected ? "waiting for phone…" : PH.hz > 0 ? `phone connected, ~${Math.round(PH.hz)} Hz` : "phone connected, tap Start on it";
 async function phoneInit() {
@@ -804,9 +855,9 @@ async function begin(withCamera) {
       st.textContent = "Requesting camera…";
       video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }, audio: false });
       await video.play();
-      st.textContent = "Loading hand model…"; landmarker = await makeLandmarker(); P.src = "hand";
+      st.textContent = "Loading hand model…"; landmarker = await makeLandmarker(); if (P.src !== "phone") P.src = "hand";
     }
-    document.getElementById("overlay").remove(); requestAnimationFrame(frame);
+    document.getElementById("overlay")?.remove(); if (!started) { started = true; requestAnimationFrame(frame); }
   } catch (e) { console.error(e); b1.disabled = b2.disabled = false; st.textContent = "Could not start: " + (e.message || e) + ". Open this file through http://localhost or https and allow the camera, or play with the mouse."; }
 }
 document.getElementById("start").addEventListener("click", () => begin(true));

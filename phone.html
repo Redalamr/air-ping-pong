@@ -15,6 +15,9 @@
   #bar span { color:var(--dim); }
   button { flex:1; min-height:140px; width:100%; border:0; border-radius:18px; font:600 26px/1.2 inherit; font-family:inherit; color:#1c0d02; background:var(--glow); }
   button:active { filter:brightness(.8); }
+  #recenter { display:none; background:#2a2140; color:var(--ink); border:2px solid var(--glow); }
+  #recenter small { display:block; margin-top:6px; font-size:14px; font-weight:400; color:var(--dim); }
+  #recenter.done { border-color:var(--ok); }
   #nums { font:12px/1.5 ui-monospace,Consolas,monospace; color:var(--dim); white-space:pre; overflow:hidden; }
   #log { height:22vh; min-height:96px; margin:0; padding:8px; overflow:auto; border-radius:10px; background:#120e20; color:var(--dim); font:11px/1.45 ui-monospace,Consolas,monospace; white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
 </style>
@@ -22,6 +25,7 @@
 <body>
 <div id="bar"><div id="conn" role="status">not connected</div><span id="hz">0 Hz</span><span id="lat">-- ms</span></div>
 <button id="start">Start</button>
+<button id="recenter">RECENTER<small>hold upright, screen facing you, top up, then tap</small></button>
 <div id="nums"></div>
 <pre id="log" aria-label="Log"></pre>
 
@@ -45,6 +49,7 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === "peer" && m.role === "game") { peer = m.connected; log(peer ? "game connected" : "game disconnected"); status(); }
     else if (m.type === "pong") rtt = performance.now() - m.t;
+    else if (m.type === "recentered") { $("recenter").classList.toggle("done", m.ok); log(m.ok ? "recentered" : "recenter failed: no orientation data yet"); }
   };
   ws.onerror = () => log("WebSocket error. If this is an iPhone or campus Wi-Fi, use the tunnel (see README).");
   ws.onclose = e => {
@@ -84,7 +89,7 @@ async function start() {
     if (res.some(r => r && r !== "granted")) { log("Motion permission denied. Allow it in the browser settings, then reload."); return; }
   } catch (e) { log("Permission error:", e.message); return; }
   if (!isSecureContext) { log("This page needs https, or the browser hides the motion sensors."); return; }
-  started = true; $("start").textContent = "Streaming…"; $("start").disabled = true;
+  started = true; $("start").style.display = "none"; $("recenter").style.display = "block";
   addEventListener("deviceorientation", onOrientation); addEventListener("devicemotion", onMotion);
   setTimeout(() => { if (!events) log("No motion events. In Chrome: Site settings > Motion sensors must be allowed."); else if (ori.alpha === null) log("Motion works but orientation is empty."); }, 1500);
 }
@@ -94,6 +99,10 @@ async function requestWake() {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden && started) { requestWake(); audio?.resume(); } });
 $("start").addEventListener("click", start);
+$("recenter").addEventListener("click", () => {
+  if (ori.alpha === null) return log("No orientation data yet: move the phone a little and retry.");
+  if (!send({ type: "recenter", ori })) log("Not connected, recenter not sent.");
+});
 
 let sent0 = 0, tHz = performance.now();
 setInterval(() => {
