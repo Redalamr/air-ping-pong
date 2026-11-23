@@ -80,7 +80,7 @@ const C = {
   PHONE_GLIDE: 3.5, // phone mode: top speed (m/s) of the automatic height
   PHONE_MOVE: 7,  // phone mode: top speed (m/s) of the racket following your thumb
   PHONE_DRAG: 2.4,// phone mode: metres the racket travels for a thumb slide across the full width of the phone
-  CAM_REACH: 1,   // phone mode: metres the racket travels when your wrist moves sideways by one shoulder width in front of the camera
+  CAM_REACH: .4,  // phone mode: metres the racket travels when your hand moves sideways by the length of your palm in front of the camera
   PHONE_MAGNET: [.4, .25, 0], // phone mode: how close (m) you must get for the racket to snap onto the ball, per assist level (casual, normal, pro)
 };
 const AIDS = [                                                     // the assist: tol = a shot that misses the table by less than this (m) is steered onto it, keeping its spin and pace; hit = hit-zone size; fwd = forward travel assumed in a swing the camera can't see
@@ -773,7 +773,7 @@ function draw(now) {
   if (PH.lost) text("phone disconnected: reopen the page on the phone, or keep playing with the mouse", W / 2, H * .89, 16, "#ff9a7a", .9);
   else if (P.src === "phone" && !PH.R0) text("hold the phone upright, screen facing you, and tap RECENTER", W / 2, H * .89, 16, "#ffd84d", .9);
   else if (P.src === "phone" && !PH.camOff) {
-    const hint = PH.cam === "loading" ? "starting the camera… allow it if asked. You can slide your thumb on the phone meanwhile" : PH.cam === "failed" ? "camera unavailable: slide your thumb on the phone to move (C retries)" : PH.cam === "on" && now - PH.camAt > 1200 ? "step back so the camera sees your shoulders and the hand holding the phone" : "";
+    const hint = PH.cam === "loading" ? "starting the camera… allow it if asked. You can slide your thumb on the phone meanwhile" : PH.cam === "failed" ? "camera unavailable: slide your thumb on the phone to move (C retries)" : PH.cam === "on" && now - PH.camAt > 1200 ? "I can't see your hand: hold it where the camera can see your fingers around the phone" : "";
     if (hint) text(hint, W / 2, H * .89, 16, "#ffd84d", .9);
   }
   if (PH.hud) drawPhoneHud();
@@ -789,11 +789,11 @@ function frame(tMs) {
 function body(tMs) {
   const dt = Math.min(.05, (tMs - (frame.last || tMs)) / 1000 || .016); frame.last = tMs;
   const now = performance.now();
-  if (P.src === "phone") {                             // with the phone, the camera only tracks where your arm is
+  if (P.src === "phone") {                             // with the phone, the camera only tracks where your hand is
     lastHand = now;
-    if (PH.pose && !PH.camOff && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    if (PH.cam === "on" && landmarker && !PH.camOff && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
       lastVideoTime = video.currentTime;
-      try { phoneCamResult(PH.pose.detectForVideo(video, now), now); } catch (e) { console.warn(e); PH.pose = null; PH.cam = "failed"; PH.camErr = e.message; }
+      try { phoneCamResult(landmarker.detectForVideo(video, now), now); } catch (e) { console.warn(e); PH.cam = "failed"; PH.camErr = e.message; }
     }
   } else if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) { lastVideoTime = video.currentTime; onDetect(landmarker.detectForVideo(video, now), now); }
   update(dt, now); draw(now);
@@ -810,7 +810,7 @@ addEventListener("keydown", e => {
   else if (k === "r") G.guide = !G.guide;
   else if (k === "a") G.aid = (G.aid + 1) % AIDS.length;
   else if (k === "c" && P.src === "phone") { if (PH.cam === "failed") { PH.cam = "off"; PH.camOff = false; phoneCamStart(); } else { PH.camOff = !PH.camOff; if (!PH.camOff) { PH.camX0 = null; phoneCamStart(); } } }
-  else if (k === "h" && P.src === "phone") { if (PH.camIdx) { PH.camIdx = PH.camIdx === 15 ? 16 : 15; PH.camKeep = true; PH.camX0 = null; } }   // the camera follows your other wrist
+  else if (k === "h" && P.src === "phone") PH.camSwap = true;   // the camera follows your other hand, as soon as it sees both
   else if (k === "h") { P.lefty = !P.lefty; P.seen = 0; P.calibrated = false; P.votes = []; }
   else if (k === "b") { P.flip = -P.flip; P.calibrated = true; }
   else if (k === "arrowup") { P.mPitch = clamp(P.mPitch + 5, -60, 75); e.preventDefault(); }
@@ -832,7 +832,7 @@ const PH = {
   hud: false, peak: 0,                                 // the debug HUD (key D) and the recent peak swing speed
   head: null, headW: 1,                                // where the racket head is drawn, and how far it may leave the hit point
   mx: 0, incoming: null,                               // your wrist's left-right position (moved by the thumb); where the CPU's ball will arrive
-  pose: null, cam: "off", camErr: "", camOff: false, camIdx: 0, camKeep: false, camX0: null, camSw: 0, camAt: 0, cx: 0,   // camera tracking: the model, its state, which wrist, its resting place, the shoulder width, last seen, and the racket offset it gives
+  cam: "off", camErr: "", camOff: false, camSwap: false, camX0: null, camSw: 0, camAt: 0, hx: .5, cx: 0,   // camera tracking: its state, a pending switch to the other hand, the hand's resting place, palm length, last seen, last place in the picture, and the racket offset it gives
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
 };
 let started = false;                                   // the game loop is running
@@ -867,36 +867,34 @@ function phoneDrag(d, pose) {                          // the thumb's slide, in 
 }
 function phoneRecenter(m) {
   if (!hasOri(m.ori)) { PH.send({ type: "recentered", ok: false }); return; }
-  PH.R0 = phonePose(m.ori).R; PH.mx = 0; PH.cx = 0; PH.camX0 = null; PH.send({ type: "recentered", ok: true });   // where your wrist is now becomes the middle of the table
+  PH.R0 = phonePose(m.ori).R; PH.mx = 0; PH.cx = 0; PH.camX0 = null; PH.send({ type: "recentered", ok: true });   // where your hand is now becomes the middle of the table
   if (!PH.userOff) P.src = "phone";
   startWithPhone(); phoneCamStart();
 }
-/* The camera gives WHERE your arm is; the phone keeps the angle and the swing. Body tracking follows the wrist even with a phone in the hand, where hand tracking needs to see the fingers */
+/* The camera gives WHERE your hand is; the phone keeps the angle and the swing */
 async function phoneCamStart() {
   if (PH.cam !== "off" || PH.camOff) return;
   PH.cam = "loading"; PH.camErr = "";
   try {
     if (!video.srcObject) { video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }, audio: false }); await video.play(); }
-    const { PoseLandmarker, FilesetResolver } = await import(`${MP}/vision_bundle.mjs`);
-    const fs = await FilesetResolver.forVisionTasks(`${MP}/wasm`);
-    const make = delegate => PoseLandmarker.createFromOptions(fs, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", delegate }, runningMode: "VIDEO", numPoses: 1 });
-    try { PH.pose = await make("GPU"); } catch { PH.pose = await make("CPU"); }
+    if (!landmarker) landmarker = await makeLandmarker();
     PH.cam = "on";
   } catch (e) { console.warn("camera tracking unavailable", e); PH.cam = "failed"; PH.camErr = e.message || String(e); }
 }
 function phoneCamResult(res, now) {
-  const L = res.landmarks && res.landmarks[0]; if (!L) return;
-  const seen = i => (L[i].visibility ?? 1) > .5;
-  if (PH.camX0 === null) {                             // the first clear view after RECENTER: the raised wrist is the one holding the phone (H swaps it), and the shoulders give the scale
-    if (!seen(11) || !seen(12)) return;
-    if (PH.camKeep) { if (!seen(PH.camIdx)) return; }
-    else { const a = seen(15), b = seen(16); if (!a && !b) return; PH.camIdx = a && b ? (L[15].y < L[16].y ? 15 : 16) : a ? 15 : 16; }
+  const hands = (res.landmarks || []).map(lm => { let x = 0, y = 0; for (const j of [0, 5, 9, 9, 13, 17]) { x += lm[j].x / 6; y += lm[j].y / 6; } return { lm, x, y }; });   // the palm centre
+  if (!hands.length) return;
+  const byDist = [...hands].sort((a, b) => Math.abs(a.x - PH.hx) - Math.abs(b.x - PH.hx));
+  let h = byDist[0];
+  if (PH.camSwap && hands.length > 1) { h = byDist[byDist.length - 1]; PH.camSwap = false; PH.camX0 = null; }     // H: go to the other hand
+  else if (PH.camX0 === null) h = hands.reduce((a, b) => b.y < a.y ? b : a);                                       // after RECENTER: the raised hand is the one holding the phone
+  else if (Math.abs(h.x - PH.hx) > .25 && now - PH.camAt < 400) return;                                            // a sudden jump is another hand or a glitch, not a move
+  if (PH.camX0 === null) {                             // its palm gives the scale, so the feel doesn't depend on how far you are from the camera
     const ar = (video.videoHeight || 9) / (video.videoWidth || 16);
-    PH.camSw = Math.max(.04, Math.hypot(L[11].x - L[12].x, (L[11].y - L[12].y) * ar)); PH.camX0 = L[PH.camIdx].x; PH.cx = 0;
+    PH.camSw = clamp(Math.hypot(h.lm[0].x - h.lm[9].x, (h.lm[0].y - h.lm[9].y) * ar), .03, .3); PH.camX0 = h.x; PH.cx = 0;
   }
-  const w = L[PH.camIdx]; if ((w.visibility ?? 1) < .4) return;
-  const target = clamp((PH.camX0 - w.x) / PH.camSw * C.CAM_REACH, -1.15, 1.15), dt = Math.min(.2, (now - PH.camAt) / 1000);   // the camera faces you, so your right is the picture's left
-  PH.cx += (target - PH.cx) * (1 - Math.exp(-dt * 22)); PH.camAt = now;
+  const target = clamp((PH.camX0 - h.x) / PH.camSw * C.CAM_REACH, -1.15, 1.15), dt = Math.min(.2, (now - PH.camAt) / 1000);   // the camera faces you, so your right is the picture's left
+  PH.cx += (target - PH.cx) * (1 - Math.exp(-dt * 22)); PH.camAt = now; PH.hx = h.x;
 }
 function phoneGone() {
   PH.connected = false; PH.s = null; PH.hz = 0; PH.rtt = null; PH.R = PH.R0 = null; PH.w = { x: 0, y: 0, z: 0 };   // a reloaded phone restarts its orientation frame, so it must recentre
@@ -912,7 +910,7 @@ function drawPhoneHud() {                              // key D
   const fh = P.N.z >= 0, f = fh ? P.N : mul(P.N, -1), pitch = Math.asin(clamp(f.y, -1, 1)) / DEG, yaw = Math.atan2(f.x, f.z) / DEG;
   const rows = [`input      ${P.src}`, `phone      ${PH.connected ? Math.round(PH.hz) + " Hz" : "off"}`, `latency    ${PH.rtt == null ? "--" : Math.round(PH.rtt / 2) + " ms"}`, `|ω|        ${Math.round(len(PH.w) / DEG)} °/s`,
     `swing      ${Math.hypot(P.vx, P.vy, P.vz).toFixed(2)} m/s`, `peak       ${PH.peak.toFixed(2)} m/s (aim ~2)`, `face       ${fh ? "FH" : "BH"} ${pitch.toFixed(0)}° pitch, ${yaw.toFixed(0)}° yaw`, `SWING_GAIN ${C.SWING_GAIN}`, `left/right ${PHONE_M[0] > 0 ? "normal" : "flipped"} (X)`,
-    `camera     ${PH.camOff ? "off (C)" : PH.cam !== "on" ? PH.cam : performance.now() - PH.camAt < 500 ? `${PH.camIdx === 16 ? "R" : "L"} wrist ${PH.cx.toFixed(2)} m` : "no body seen"}`];
+    `camera     ${PH.camOff ? "off (C)" : PH.cam !== "on" ? PH.cam : performance.now() - PH.camAt < 500 ? `hand ${PH.cx.toFixed(2)} m` : "no hand seen"}`];
   const w = 268, h = rows.length * 19 + 16, x = W - w - 14, y = 14;
   ctx.fillStyle = "rgba(12,8,24,.82)"; ctx.fillRect(x, y, w, h); ctx.textAlign = "left"; ctx.font = "13px ui-monospace,Consolas,monospace"; ctx.fillStyle = "#d9d2ee";
   rows.forEach((r, i) => ctx.fillText(r, x + 10, y + 22 + i * 19)); ctx.textAlign = "center";
