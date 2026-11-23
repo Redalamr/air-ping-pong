@@ -35,7 +35,7 @@ The server makes a new certificate each time it starts, so both devices ask you 
 
 The swing comes from wrist rotation around the bottom of the phone. A phone held perfectly vertical can't produce upward racket speed, so tilt its top about 45 to 60 degrees to the side for topspin.
 
-RECENTER turns the camera on (allow it on the laptop). Keep the hand holding the phone in view, with your fingers visible around it. Where your hand is when you tap RECENTER becomes the middle of the table. **C** turns camera tracking off or retries it, and **H** switches it to your other hand when both are in view. To change how far the racket travels, set `APP.C.CAM_REACH` in the laptop's console.
+RECENTER turns the camera on (allow it on the laptop). Keep the hand holding the phone and your shoulders in view: when the phone hides your palm, the game finds that hand through body tracking. Where your hand is when you tap RECENTER becomes the middle of the table. **C** turns camera tracking off or retries it, and **H** switches it to your other hand when both are in view. To change how far the racket travels, set `APP.C.CAM_REACH` in the laptop's console.
 
 With the thumb pad, slide toward your right to go right, whichever way the phone faces. The racket's height follows the ball automatically. A ring shows where the ball will arrive and turns green when your racket is there. Once you are close, the racket snaps onto the ball (less on higher assist levels, not at all on `pro`). The racket also turns around your wrist, so tilting the phone adds some reach.
 
