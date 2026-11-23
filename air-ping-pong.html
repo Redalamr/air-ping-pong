@@ -275,7 +275,7 @@ function phoneRacket(dt) {
   const s = proj(P.x, P.y, P.z); P.sx = P.tx = s.x; P.sy = P.ty = s.y; P.rpx = s.k * PR * AIDS[G.aid].hit;
   // the swing is the wrist's rotation: v = SWING_GAIN · (ω × LEVER·up). The automatic glide is not part of it. Old data (a network hiccup) must not read as a swing
   const v = PH.R0 && performance.now() - PH.lastAt < 120 ? mul(cross(PH.w, mul(P.tUp, C.LEVER)), C.SWING_GAIN) : { x: 0, y: 0, z: 0 };
-  P.vx = v.x; P.vy = v.y; P.vz = v.z;
+  P.vx = v.x; P.vy = v.y; P.vz = v.z; PH.peak = Math.max(len(v), PH.peak * Math.exp(-dt / 1.2));   // the peak is what you read on the HUD to tune SWING_GAIN
   P.hist.push({ t: G.t, x: P.x, y: P.y, z: P.z, sx: P.sx, sy: P.sy }); while (P.hist.length > 1 && P.hist[0].t < G.t - .25) P.hist.shift();
   // the serve only arms once the phone has been still for a moment, so picking it up or tapping RECENTER can't launch the ball
   if (!phoneServing() || !PH.R0) { PH.armed = false; PH.calm = 0; }
@@ -467,6 +467,7 @@ function playerHit(m, serve) {
   G.feed.unshift({ who: "P", kind, fh: hit.fh, top: B.wx, side: B.wy, steered, t: G.t }); if (G.feed.length > 4) G.feed.length = 4;
   G.path = null; G.last = { who: "P", kind }; P.flash = 1; P.lunge = Math.max(0, B.z - P.z);
   SND.hit(true, clamp(hit.swing / 3, 0, 1)); burst(B.x, B.y, B.z, ST[kind].col);
+  if (P.src === "phone") PH.send({ type: "hit", power: clamp(hit.swing / 3, 0, 1) });   // the buzz and click on the phone
   return true;
 }
 function preview() {                               // the ring on the table: where the ball would go if it met your racket as you hold it right now
@@ -751,8 +752,9 @@ function draw(now) {
   if (landmarker && P.src !== "phone" && now - lastHand > 1500) text("I can't see your hand: hold it up in front of the camera", W / 2, H * .93, 16, "#ff9a7a", .9);
   if (PH.lost) text("phone disconnected: reopen the page on the phone, or keep playing with the mouse", W / 2, H * .89, 16, "#ff9a7a", .9);
   else if (P.src === "phone" && !PH.R0) text("hold the phone upright, screen facing you, and tap RECENTER", W / 2, H * .89, 16, "#ffd84d", .9);
+  if (PH.hud) drawPhoneHud();
   if (G.paused) { ctx.fillStyle = "rgba(6,4,12,.7)"; ctx.fillRect(0, 0, W, H); text("paused · press P", W / 2, H / 2, H * .06, "#ffd9b0", .95); }
-  ctx.textAlign = "left"; text(`level ${LV[G.level].n} (1 2 3) · assist ${AIDS[G.aid].n} (A) · guides ${G.guide ? "on" : "off"} (R) · H other hand · B swap palm/back · V camera · M ${SND.muted ? "unmute" : "mute"} · P pause · F full screen${P.src === "mouse" ? " · wheel / ↑↓ face angle" : ""}${PH.connected ? ` · T ${P.src === "phone" ? "hand/mouse" : "phone"}` : ""}`, 14, H - 12, 13, "#a79cc4", .5, 400);
+  ctx.textAlign = "left"; text(`level ${LV[G.level].n} (1 2 3) · assist ${AIDS[G.aid].n} (A) · guides ${G.guide ? "on" : "off"} (R) · H other hand · B swap palm/back · V camera · M ${SND.muted ? "unmute" : "mute"} · P pause · F full screen${P.src === "mouse" ? " · wheel / ↑↓ face angle" : ""}${PH.connected ? ` · T ${P.src === "phone" ? "hand/mouse" : "phone"} · D debug` : ""}`, 14, H - 12, 13, "#a79cc4", .5, 400);
 }
 
 /* ═══════════ Loop ═══════════ */
@@ -781,6 +783,7 @@ addEventListener("keydown", e => {
   else if (k === "b") { P.flip = -P.flip; P.calibrated = true; }
   else if (k === "arrowup") { P.mPitch = clamp(P.mPitch + 5, -60, 75); e.preventDefault(); }
   else if (k === "arrowdown") { P.mPitch = clamp(P.mPitch - 5, -60, 75); e.preventDefault(); }
+  else if (k === "d" && PH.ok) PH.hud = !PH.hud;
   else if (k === "t" && PH.connected) { if (P.src === "phone") { PH.userOff = true; P.src = landmarker ? "hand" : "mouse"; P.ls0 = null; } else { PH.userOff = false; P.src = "phone"; } }
   else if (k === "1" || k === "2" || k === "3") G.level = +k - 1;
   else if (k === "f") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); }
@@ -793,6 +796,7 @@ const PH = {
   ok: location.protocol !== "file:", ws: null, room: "", connected: false, s: null, n: 0, hz: 0, rtt: null, lastAt: 0, retry: 500,
   R: null, R0: null, w: { x: 0, y: 0, z: 0 }, userOff: false, lost: false,   // R: latest orientation, R0: the recentre pose, w: angular velocity in game axes
   aim: null, aimFor: null, armed: false, calm: 0,      // the predicted meeting point and which CPU shot it is for; whether a swing may launch the serve
+  hud: false, peak: 0,                                 // the debug HUD (key D) and the recent peak swing speed
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
 };
 let started = false;                                   // the game loop is running
@@ -836,6 +840,14 @@ function startWithPhone() {                            // recentring starts the 
   const unlock = () => { removeEventListener("pointerdown", unlock); removeEventListener("keydown", unlock); if (!SND.c) SND.start().catch(console.warn); };
   addEventListener("pointerdown", unlock); addEventListener("keydown", unlock);
 }
+function drawPhoneHud() {                              // key D
+  const fh = P.N.z >= 0, f = fh ? P.N : mul(P.N, -1), pitch = Math.asin(clamp(f.y, -1, 1)) / DEG, yaw = Math.atan2(f.x, f.z) / DEG;
+  const rows = [`input      ${P.src}`, `phone      ${PH.connected ? Math.round(PH.hz) + " Hz" : "off"}`, `latency    ${PH.rtt == null ? "--" : Math.round(PH.rtt / 2) + " ms"}`, `|ω|        ${Math.round(len(PH.w) / DEG)} °/s`,
+    `swing      ${Math.hypot(P.vx, P.vy, P.vz).toFixed(2)} m/s`, `peak       ${PH.peak.toFixed(2)} m/s (aim ~2)`, `face       ${fh ? "FH" : "BH"} ${pitch.toFixed(0)}° pitch, ${yaw.toFixed(0)}° yaw`, `SWING_GAIN ${C.SWING_GAIN}`];
+  const w = 268, h = rows.length * 19 + 16, x = W - w - 14, y = 14;
+  ctx.fillStyle = "rgba(12,8,24,.82)"; ctx.fillRect(x, y, w, h); ctx.textAlign = "left"; ctx.font = "13px ui-monospace,Consolas,monospace"; ctx.fillStyle = "#d9d2ee";
+  rows.forEach((r, i) => ctx.fillText(r, x + 10, y + 22 + i * 19)); ctx.textAlign = "center";
+}
 function phoneConnect() {
   const ws = PH.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?room=${PH.room}&role=game`);
   ws.onopen = () => { PH.retry = 500; };
@@ -844,7 +856,7 @@ function phoneConnect() {
     if (m.type === "m") { PH.s = m; PH.n++; PH.lastAt = performance.now(); phoneSample(m); }
     else if (m.type === "recenter") phoneRecenter(m);
     else if (m.type === "ping") { PH.rtt = m.rtt; PH.send({ type: "pong", t: m.t }); }
-    else if (m.type === "peer" && m.role === "phone") { if (m.connected) PH.connected = true; else phoneGone(); }
+    else if (m.type === "peer" && m.role === "phone") { if (m.connected) { PH.connected = true; PH.R = PH.R0 = null; PH.w = { x: 0, y: 0, z: 0 }; } else phoneGone(); }   // a new or reloaded phone must recentre
   };
   ws.onclose = e => { phoneGone(); if (e.code !== 4000) { setTimeout(phoneConnect, PH.retry); PH.retry = Math.min(PH.retry * 2, 4000); } };
 }
