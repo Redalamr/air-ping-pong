@@ -33,7 +33,9 @@ The server makes a new certificate each time it starts, so both devices ask you 
 
 The swing comes from wrist rotation around the bottom of the phone. A phone held perfectly vertical can't produce upward racket speed, so tilt its top about 45 to 60 degrees to the side for topspin.
 
-Keys: **T** switches between phone and hand/mouse, **D** shows the debug HUD. The original keys still work.
+The racket turns around your wrist, so its head follows the top of the phone. As the ball arrives, the head eases back to the automatic hit position.
+
+Keys: **T** switches between phone and hand/mouse, **D** shows the debug HUD, **X** flips left and right if your phone reports them reversed. The original keys still work.
 
 ## Tuning
 
