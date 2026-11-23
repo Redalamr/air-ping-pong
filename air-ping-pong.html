@@ -75,6 +75,9 @@ const C = {
   KICK_T: .0075,  // how strongly incoming topspin / backspin disturbs the CPU's returns
   KICK_S: .006,   // the same for sidespin
   PHONE_FACE_SMOOTH: 45, // racket angle smoothing with the phone: its gyroscope is much cleaner than the camera, so this can be lighter
+  LEVER: .35,     // phone mode: distance (m) from the wrist to the racket centre
+  SWING_GAIN: .5, // phone mode: scales wrist speed into racket speed. Tune it so a relaxed forehand reads about 2 m/s on the debug HUD (key D)
+  PHONE_GLIDE: 3.5, // phone mode: top speed (m/s) of the automatic racket positioning
 };
 const AIDS = [                                                     // the assist: tol = a shot that misses the table by less than this (m) is steered onto it, keeping its spin and pace; hit = hit-zone size; fwd = forward travel assumed in a swing the camera can't see
   { n: "casual", tol: .75, hit: 1.35, fwd: .5 },
@@ -235,7 +238,8 @@ function moveRacket(dt) {                              // smoothed on screen, pl
   if (P.src === "phone") { if (dot(P.N, f.N) < 0) P.N = f.N; if (dot(P.up, f.up) < 0) P.up = f.up; }   // blending across a half-turn would stall, so a flip is taken at once
   const nN = add(mul(P.N, 1 - kf), f.N, kf); P.N = len(nN) > .05 ? nrm(nN) : f.N;
   const nU = add(mul(P.up, 1 - kf), f.up, kf); P.up = len(nU) > .05 ? nrm(nU) : f.up;
-  let zt = 0;                                          // forward / back: the hand growing in the picture means it came closer to the camera, i.e. toward the table
+  if (P.src === "phone") { phoneRacket(dt); return; }
+  let zt = 0;                                         // forward / back: the hand growing in the picture means it came closer to the camera, i.e. toward the table
   if (P.src === "hand" && P.ls !== null && video.videoWidth) {
     if (P.ls0 === null) P.ls0 = P.ls;
     P.ls0 += (P.ls - P.ls0) * (1 - Math.exp(-dt / 1.5));                         // the resting distance drifts slowly, so only real pushes count
@@ -248,6 +252,34 @@ function moveRacket(dt) {                              // smoothed on screen, pl
   const ref = P.hist.find(s => s.t >= G.t - .08) || P.hist[0], span = Math.max(.03, G.t - ref.t);        // velocity over the last 80 ms
   P.vx = (P.x - ref.x) / span; P.vy = (P.y - ref.y) / span; P.vz = (P.z - ref.z) / span;
   P.rpx = proj(P.x, P.y, P.z).k * PR * AIDS[G.aid].hit;               // the hit zone on the screen
+}
+
+/* Phone mode, like Wii Sports Resort: the racket places itself, and you only control its angle, timing and swing */
+function phoneCrossing() {                             // where the incoming ball will cross the racket's plane after its bounce (the same prediction as preview())
+  const o = copyBall(B); let bnc = B.bnc;
+  for (let i = 0; i < 700; i++) { fly(o, HS); if (tableBounce(o)) bnc++; if (bnc > 1 || o.y < .35) return null; if (bnc === 1 && o.z <= -PL) return { x: o.x, y: o.y }; }
+  return null;
+}
+const phoneServing = () => G.state === "menu" || G.state === "over" || (G.state === "serve" && G.server === "P");
+function phoneTarget() {
+  if (phoneServing()) return { x: B.x, y: B.y - .05 };                            // just under the floating ball
+  if (G.state === "rally" && B.hitBy === "A" && B.bnc <= 1) {
+    if (PH.aimFor !== G.feed[0]) { PH.aimFor = G.feed[0]; PH.aim = phoneCrossing(); }    // once per CPU shot
+    if (PH.aim) return PH.aim;
+  }
+  return { x: 0, y: 1.15 };
+}
+function phoneRacket(dt) {
+  const t = phoneTarget(), dx = t.x - P.x, dy = t.y - P.y, d = Math.hypot(dx, dy), step = C.PHONE_GLIDE * dt, f = d > step ? step / d : 1;
+  P.x = clamp(P.x + dx * f, -1.8, 1.8); P.y = clamp(P.y + dy * f, .45, 2.2); P.zoff = 0; P.z = -PL; P.lunge = Math.max(0, P.lunge - dt * 2.5);
+  const s = proj(P.x, P.y, P.z); P.sx = P.tx = s.x; P.sy = P.ty = s.y; P.rpx = s.k * PR * AIDS[G.aid].hit;
+  // the swing is the wrist's rotation: v = SWING_GAIN · (ω × LEVER·up). The automatic glide is not part of it. Old data (a network hiccup) must not read as a swing
+  const v = PH.R0 && performance.now() - PH.lastAt < 120 ? mul(cross(PH.w, mul(P.tUp, C.LEVER)), C.SWING_GAIN) : { x: 0, y: 0, z: 0 };
+  P.vx = v.x; P.vy = v.y; P.vz = v.z;
+  P.hist.push({ t: G.t, x: P.x, y: P.y, z: P.z, sx: P.sx, sy: P.sy }); while (P.hist.length > 1 && P.hist[0].t < G.t - .25) P.hist.shift();
+  // the serve only arms once the phone has been still for a moment, so picking it up or tapping RECENTER can't launch the ball
+  if (!phoneServing() || !PH.R0) { PH.armed = false; PH.calm = 0; }
+  else if (!PH.armed) { PH.calm = len(v) < C.SERVE_V ? PH.calm + dt : 0; PH.armed = PH.calm > .25; }
 }
 
 /* ═══════════ Physics: flight, spin and bounces ═══════════ */
@@ -528,7 +560,7 @@ function update(dt, now) {
   if (st === "menu" || st === "over" || (st === "serve" && G.server === "P")) {
     hoverBall("P");
     const pb = proj(B.x, B.y, B.z), pc = proj(P.x, P.y, P.z), dx = pb.x - pc.x, dy = pb.y - pc.y;
-    if (Math.hypot(dx, dy) < P.rpx + pb.k * R * .6 && Math.hypot(P.vx, P.vy, P.vz) > C.SERVE_V) {            // a quick swing through the ball: serve
+    if (Math.hypot(dx, dy) < P.rpx + pb.k * R * .6 && Math.hypot(P.vx, P.vy, P.vz) > C.SERVE_V && (P.src !== "phone" || PH.armed)) {           // a quick swing through the ball: serve
       if (st !== "serve") resetMatch();
       G.state = "rally"; G.rally = 0; if (playerHit({ x: dx / P.rpx, y: -dy / P.rpx }, true)) aiPlan(); else G.state = st;
     }
@@ -760,6 +792,7 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) G.pau
 const PH = {
   ok: location.protocol !== "file:", ws: null, room: "", connected: false, s: null, n: 0, hz: 0, rtt: null, lastAt: 0, retry: 500,
   R: null, R0: null, w: { x: 0, y: 0, z: 0 }, userOff: false, lost: false,   // R: latest orientation, R0: the recentre pose, w: angular velocity in game axes
+  aim: null, aimFor: null, armed: false, calm: 0,      // the predicted meeting point and which CPU shot it is for; whether a swing may launch the serve
   send(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); },
 };
 let started = false;                                   // the game loop is running
